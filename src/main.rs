@@ -1,9 +1,11 @@
 mod discord;
+mod images;
 mod transform;
 
 use discord::{Client, Message};
 use eframe::egui;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 use std::time::Duration;
@@ -11,6 +13,7 @@ use transform::discord_to_caption;
 
 const DEFAULT_CHANNEL_ID: &str = "981806074233507880"; // Mayo Jaune announcements
 const DEFAULT_FETCH_LIMIT: u32 = 50;
+const IMAGES_DIR: &str = "images";
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -20,7 +23,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "discord_to_insta",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new()))),
+        Box::new(|cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(App::new()))
+        }),
     )
 }
 
@@ -241,12 +247,39 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let caption = discord_to_caption(&self.raw, &self.user_map());
+            let distance_km = images::parse_distance_km(&self.raw);
+            let image_path = distance_km
+                .and_then(|km| images::image_for_distance(Path::new(IMAGES_DIR), km));
 
             ui.heading("discord_to_insta");
+            ui.horizontal(|ui| {
+                ui.label("Image:");
+                match (distance_km, &image_path) {
+                    (Some(km), Some(p)) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(80, 180, 100),
+                            format!("✓ {} km → {}", km, display_path(p)),
+                        );
+                    }
+                    (Some(km), None) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 160, 60),
+                            format!(
+                                "⚠ {} km detected but no image found in {}/ (expected *_{}.png)",
+                                km, IMAGES_DIR, km
+                            ),
+                        );
+                    }
+                    (None, _) => {
+                        ui.label("(no distance detected — caption must contain 'Distance : Nkm')");
+                    }
+                }
+            });
             ui.separator();
 
             let available = ui.available_size();
-            let col_width = (available.x - 16.0) / 2.0;
+            let preview_width = 260.0;
+            let col_width = (available.x - preview_width - 24.0) / 2.0;
             let col_height = available.y - 40.0;
 
             ui.horizontal(|ui| {
@@ -287,9 +320,34 @@ impl eframe::App for App {
                             );
                         });
                 });
+
+                ui.vertical(|ui| {
+                    ui.label("Post image preview");
+                    match &image_path {
+                        Some(p) => {
+                            let uri = format!("file://{}", p.display());
+                            ui.add(
+                                egui::Image::from_uri(uri)
+                                    .max_width(preview_width)
+                                    .maintain_aspect_ratio(true)
+                                    .fit_to_original_size(1.0),
+                            );
+                        }
+                        None => {
+                            ui.allocate_space(egui::vec2(preview_width, col_height));
+                        }
+                    }
+                });
             });
         });
     }
+}
+
+fn display_path(p: &PathBuf) -> String {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 fn message_preview(content: &str) -> String {

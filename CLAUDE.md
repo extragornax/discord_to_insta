@@ -64,6 +64,10 @@ Every logical change produces a git commit — there are no uncommitted slices a
 
 `images/` holds the per-distance post templates (naming pattern `*_{km}.png`, where `{km}` is the integer kilometer distance, e.g. `mayo-post-ok-v6-2025-feed_20.png`). These are ~5 MB each and are currently committed to regular git history. If that ever becomes a pain (slow clones, bloated `.git`), migrate them to Git LFS rather than leaving them where they are.
 
+The lookup is done by **suffix**, not by full filename — `src/images.rs::image_for_distance` globs the folder for any file whose stem ends in `_{km}`. So you can drop a `v7` redesign into `images/` without touching code; the only contract is the `_{integer_km}.{png|jpg|jpeg}` suffix.
+
+Distance is parsed out of the Discord message via the regex in `src/images.rs`: it expects a literal `distance` (case-insensitive) followed by `:` or `=`, a number (`.` or `,` as decimal separator), and `km`. Non-integer distances are rounded to the nearest integer.
+
 ## Current State
 
 As of this file's creation the repo contains only the Cargo scaffold and a `Hello, world!` `main.rs`. There is no existing architecture to preserve — greenfield decisions are on the table. Prefer growing the codebase in small, reviewable slices (ingest first, then compose, then publish, then UI) rather than landing the whole pipeline at once.
