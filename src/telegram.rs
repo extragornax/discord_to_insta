@@ -122,33 +122,38 @@ impl Client {
         format!("{API_BASE}{}/{method}", self.token)
     }
 
-    /// Post the image and a text message with inline keyboard. The keyboard
-    /// carries the discord_message_id so callbacks can be routed back.
-    /// Returns the `message_id` of the text message (the one with buttons),
-    /// so callers can edit it to show the outcome later.
-    pub async fn send_preview(
+    /// Post the image and a text message with a two-button inline keyboard.
+    /// All text and callback data are caller-supplied so the same transport
+    /// can serve both "publish" and "edit-caption" approvals. Returns the
+    /// `message_id` of the text message so callers can `editMessageText` it
+    /// later to reflect the outcome.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_preview_with_mode(
         &self,
         chat_id: i64,
+        intro: &str,
         caption: &str,
         image_bytes: Vec<u8>,
         image_filename: &str,
-        discord_msg_id: &str,
+        approve_callback: &str,
+        reject_callback: &str,
+        approve_label: &str,
+        reject_label: &str,
     ) -> Result<i64, Error> {
         // Photo first, no caption — caption goes on the text message so the
         // whole Instagram caption is visible regardless of the 1024-char
         // sendPhoto caption limit.
         self.send_photo(chat_id, image_bytes, image_filename).await?;
 
-        // Text message with the full caption + approval buttons.
         let reply_markup = json!({
             "inline_keyboard": [[
-                { "text": "✅ Publier sur Instagram", "callback_data": format!("approve:{discord_msg_id}") },
-                { "text": "❌ Annuler", "callback_data": format!("reject:{discord_msg_id}") }
+                { "text": approve_label, "callback_data": approve_callback },
+                { "text": reject_label,  "callback_data": reject_callback }
             ]]
         });
         let body = json!({
             "chat_id": chat_id,
-            "text": format!("📬 Aperçu à valider avant publication Instagram :\n\n{caption}"),
+            "text": format!("{intro}\n\n{caption}"),
             "reply_markup": reply_markup,
             // Plain text — don't let any * / _ / ` in the caption break.
             "disable_web_page_preview": true,

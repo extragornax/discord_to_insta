@@ -27,6 +27,14 @@ pub struct AppState {
     /// `<@id>` mentions. Absent IDs are just dropped from the caption.
     #[serde(default)]
     pub handles: HashMap<String, String>,
+
+    /// Discord message ID → Instagram media ID, populated by the Instagram
+    /// publish step after a successful `/media_publish`. The edit-approval
+    /// flow checks this to decide whether a Discord edit has anything to
+    /// propagate: no entry → nothing was ever posted to Instagram, nothing
+    /// to update.
+    #[serde(default)]
+    pub published_to_instagram: HashMap<String, String>,
 }
 
 impl AppState {

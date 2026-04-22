@@ -44,6 +44,20 @@ All notable changes to this project are recorded here. Format loosely follows [K
 - `README.md`: project overview, quick-start (docker and cargo), full env-var table, post-image naming convention, auto-react semantics, security note on the unauth'd web UI, known caption-transform limits, and a file-tree cheat sheet. — 2026-04-22
 - `.github/workflows/deploy.yml`: CI deploy. Triggers on push to `master`/`main` (plus `workflow_dispatch`), SSHes into the target via `appleboy/ssh-action@v1.2.0`, runs `git pull --ff-only` and `docker compose up -d --build`, then `docker image prune -f` to avoid layer bloat. `concurrency: deploy` serializes deploys. Requires secrets `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`, `DEPLOY_PATH` (+ optional `SSH_PORT`). README gained a matching "Deployment" section documenting one-time server setup. — 2026-04-22
 
+### Added (Discord edits → Telegram edit-approval gate)
+- `src/state.rs`: new `published_to_instagram: HashMap<discord_msg_id, ig_media_id>` field with `#[serde(default)]`. Populated by the forthcoming Instagram publish step; consulted by the edit-approval flow to decide whether a Discord edit has anything to propagate. — 2026-04-22
+- `src/discord.rs`: new `fetch_message(channel_id, msg_id)` — single-message GET used by the edit-watcher because MESSAGE_UPDATE gateway events don't include `content` without the privileged MESSAGE_CONTENT intent. — 2026-04-22
+- `src/gateway.rs`: dispatch on MESSAGE_UPDATE in addition to MESSAGE_CREATE. Filtered by channel_id; forwards the message id onto a new `edit_tx` mpsc sender. Log line `gateway: edit detected on {id}` makes the pipeline visible in the Télex. — 2026-04-22
+- `src/main.rs`:
+  - New `ApprovalMode` enum (`Publish` / `EditCaption`) parameterizes `run_approval` with distinct Telegram intro copy, button labels, callback prefix, and log tag. Callback data is now `verb:mode:id` — the router also still accepts the legacy `verb:id` format for any in-flight Telegram messages posted by older versions.
+  - Pending-approvals map keyed as `{mode}:{id}` so publish and edit approvals can't collide.
+  - New `run_edit_watcher` task consumes the gateway-fed edit IDs, fetches via REST, runs `run_approval` in `EditCaption` mode.
+  - New `POST /api/telegram/request_edit` endpoint + `Tester la modification` button in § II so operators can exercise the edit path manually without waiting on a real Discord edit.
+  - `api_telegram_request` and `handle_batch` updated to pass `ApprovalMode::Publish`. — 2026-04-22
+- `src/telegram.rs`: `send_preview_with_mode` (replacing the old `send_preview`) takes caller-supplied intro text, button labels, and callback-data strings so the same transport serves both approval modes. — 2026-04-22
+- `src/index.html`: new `Tester la modification` button next to `Envoyer pour approbation`. — 2026-04-22
+- Instagram publish + caption-update Graph API calls are still unwired; approvals continue to only log the decision. The edit-approval logs `mise à jour Instagram à venir` where the caption-update call will slot in. — 2026-04-22
+
 ### Added (Telegram approval gate)
 - `src/telegram.rs` (new): minimal Bot API client — `sendPhoto` (multipart), `sendMessage` with inline keyboard, `getUpdates` long-polling (25 s), `answerCallbackQuery`, `editMessageText`. Typed Update / CallbackQuery / CallbackFrom deserializers. Three unit tests. — 2026-04-22
 - `Cargo.toml`: added the `multipart` feature to reqwest. — 2026-04-22

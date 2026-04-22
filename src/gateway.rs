@@ -40,6 +40,10 @@ pub struct GatewayCtx {
     /// Poked on every MESSAGE_CREATE for `channel_id`. The poller awaits this
     /// alongside its timer so new announcements get reacted to in seconds.
     pub poll_trigger: Arc<tokio::sync::Notify>,
+    /// Every MESSAGE_UPDATE for `channel_id` pushes the message id here.
+    /// The edit-watcher task in `main.rs` consumes these and fetches the
+    /// updated body via REST (we don't have MESSAGE_CONTENT intent).
+    pub edit_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 pub async fn run(ctx: GatewayCtx) {
@@ -212,6 +216,27 @@ async fn connect_once(ctx: &GatewayCtx) -> ConnectOutcome {
                                     )
                                     .await;
                                     ctx.poll_trigger.notify_one();
+                                }
+                            }
+                            Some("MESSAGE_UPDATE") => {
+                                // Discord fires this for content edits, embed
+                                // resolves (e.g. a URL in the message gets a
+                                // preview embed), pin status changes, etc. We
+                                // forward unconditionally and let the edit
+                                // watcher in main.rs fetch + diff.
+                                let ch = v["d"]["channel_id"].as_str().unwrap_or("");
+                                if ch == ctx.channel_id {
+                                    let id = v["d"]["id"].as_str().unwrap_or("").to_string();
+                                    if !id.is_empty() {
+                                        push(
+                                            &ctx.log,
+                                            &format!("gateway: edit detected on {id}"),
+                                        )
+                                        .await;
+                                        if let Some(tx) = &ctx.edit_tx {
+                                            let _ = tx.send(id);
+                                        }
+                                    }
                                 }
                             }
                             _ => {}

@@ -177,6 +177,35 @@ impl Client {
             .map_err(|e| Error::Parse(format!("{e} — body was: {body}")))
     }
 
+    /// Fetch a single message by ID. Used by the edit-watcher because the
+    /// gateway's MESSAGE_UPDATE event doesn't carry `content` (we'd need
+    /// the privileged MESSAGE_CONTENT intent for that).
+    pub async fn fetch_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> Result<Message, Error> {
+        let url = format!("{API_BASE}/channels/{channel_id}/messages/{message_id}");
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .send()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        if !(200..300).contains(&status) {
+            return Err(map_status(status, body));
+        }
+        serde_json::from_str::<Message>(&body)
+            .map_err(|e| Error::Parse(format!("{e} — body was: {body}")))
+    }
+
     /// React to a message as the bot. `emoji` must be a Unicode emoji string
     /// (e.g. "✅"). Custom emojis would need `name:id` form, not supported here.
     pub async fn add_reaction(

@@ -89,12 +89,38 @@ struct AppCtx {
     /// buttons still exist; stale clicks just get a "session expired"
     /// toast and are ignored.
     pending_approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>>>,
+    /// Sender side of the channel that the gateway and the manual UI
+    /// endpoint push edited-message IDs onto. Absent when Telegram isn't
+    /// configured (nothing would consume them).
+    edit_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 #[derive(Debug, Clone)]
 enum ApprovalOutcome {
     Approved { by: String },
     Rejected { by: String },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ApprovalMode {
+    Publish,
+    EditCaption,
+}
+
+impl ApprovalMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            ApprovalMode::Publish => "publish",
+            ApprovalMode::EditCaption => "edit",
+        }
+    }
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "publish" => Some(ApprovalMode::Publish),
+            "edit" => Some(ApprovalMode::EditCaption),
+            _ => None,
+        }
+    }
 }
 
 #[tokio::main]
@@ -162,6 +188,15 @@ async fn main() {
         None
     };
 
+    // Edit-watcher channel: only wired when Telegram is configured, since
+    // nothing downstream would consume the signal otherwise.
+    let (edit_tx, edit_rx) = if telegram.is_some() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
     let ctx = AppCtx {
         config: config.clone(),
         client,
@@ -173,6 +208,7 @@ async fn main() {
         state_write_lock: Arc::new(Mutex::new(())),
         telegram: telegram.clone(),
         pending_approvals: Arc::new(Mutex::new(HashMap::new())),
+        edit_tx: edit_tx.clone(),
     };
 
     // Telegram updates loop: long-polls getUpdates and routes callback_query
@@ -180,6 +216,14 @@ async fn main() {
     if telegram.is_some() {
         let ctx_for_tg = ctx.clone();
         tokio::spawn(async move { run_telegram_updates(ctx_for_tg).await });
+    }
+
+    // Edit watcher: consumes message IDs from the channel the gateway
+    // pushes onto, fetches the updated body via REST, runs an edit-mode
+    // approval through Telegram.
+    if let Some(rx) = edit_rx {
+        let ctx_for_edits = ctx.clone();
+        tokio::spawn(async move { run_edit_watcher(ctx_for_edits, rx).await });
     }
 
     // Gateway task: holds a WebSocket to Discord so the bot shows as online,
@@ -193,6 +237,7 @@ async fn main() {
             log: ctx.poller_log.clone(),
             connected: ctx.gateway_connected.clone(),
             poll_trigger: ctx.poll_trigger.clone(),
+            edit_tx: ctx.edit_tx.clone(),
         };
         tokio::spawn(gateway::run(gw_ctx));
     }
@@ -217,6 +262,7 @@ async fn main() {
         .route("/api/gateway/status", get(api_gateway_status))
         .route("/api/telegram/status", get(api_telegram_status))
         .route("/api/telegram/request", post(api_telegram_request))
+        .route("/api/telegram/request_edit", post(api_telegram_request_edit))
         .nest_service("/images", ServeDir::new(config.images_dir.clone()))
         .with_state(ctx);
 
@@ -420,9 +466,77 @@ async fn api_telegram_request(
     let ctx2 = ctx.clone();
     let tg2 = tg.clone();
     tokio::spawn(async move {
-        run_approval(ctx2, tg2, chat_id, synthetic_id, caption, image_path).await;
+        run_approval(
+            ctx2,
+            tg2,
+            chat_id,
+            synthetic_id,
+            caption,
+            image_path,
+            ApprovalMode::Publish,
+        )
+        .await;
     });
     Html(r#"<span class="badge ok">envoyé — en attente d'approbation sur Telegram</span>"#.into())
+}
+
+/// Manual trigger of the edit-approval flow. Builds a synthetic edit
+/// approval from the current editor state so operators can preview the
+/// "update Instagram caption?" UX without needing a real Discord edit.
+async fn api_telegram_request_edit(
+    State(ctx): State<AppCtx>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Html<String> {
+    let Some(tg) = ctx.telegram.clone() else {
+        return Html(r#"<span class="badge muted">Telegram non-configuré</span>"#.into());
+    };
+    let Some(chat_id) = ctx.config.telegram_chat_id else {
+        return Html(r#"<span class="badge muted">TELEGRAM_APPROVAL_CHAT_ID manquant</span>"#.into());
+    };
+
+    let raw = form.get("raw").cloned().unwrap_or_default();
+    if raw.trim().is_empty() {
+        return Html(
+            r#"<span class="badge warn">rien à approuver — saisissez une source d'abord</span>"#
+                .into(),
+        );
+    }
+    let user_map = AppState::load(&ctx.config.state_path).handles;
+    let caption = discord_to_caption(&raw, &user_map);
+    let image = images::parse_distance_km(&raw)
+        .and_then(|km| images::image_for_distance(ctx.config.images_dir.as_path(), km));
+    let Some(image_path) = image else {
+        return Html(
+            r#"<span class="badge warn">pas d'image — distance manquante ou gabarit introuvable</span>"#
+                .into(),
+        );
+    };
+
+    let synthetic_id = format!(
+        "manual-edit-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let ctx2 = ctx.clone();
+    let tg2 = tg.clone();
+    tokio::spawn(async move {
+        run_approval(
+            ctx2,
+            tg2,
+            chat_id,
+            synthetic_id,
+            caption,
+            image_path,
+            ApprovalMode::EditCaption,
+        )
+        .await;
+    });
+    Html(
+        r#"<span class="badge ok">envoyé — validation d'édition sur Telegram</span>"#
+            .into(),
+    )
 }
 
 async fn api_handles_get(State(ctx): State<AppCtx>) -> Html<String> {
@@ -778,6 +892,7 @@ async fn handle_batch(ctx: &AppCtx, messages: Vec<Message>) -> std::io::Result<(
                                 key,
                                 caption,
                                 image_path,
+                                ApprovalMode::Publish,
                             )
                             .await;
                         });
@@ -819,19 +934,30 @@ async fn run_telegram_updates(ctx: AppCtx) {
                     offset = Some(u.update_id + 1);
                     let Some(cb) = u.callback_query else { continue };
                     let data = cb.data.as_deref().unwrap_or("");
-                    let (verdict, id) = match data.split_once(':') {
-                        Some(("approve", id)) => (Some(true), id.to_string()),
-                        Some(("reject", id)) => (Some(false), id.to_string()),
-                        _ => (None, String::new()),
+                    // Callback data takes one of:
+                    //   verb:mode:id    (current format — verb ∈ {approve,reject},
+                    //                    mode ∈ {publish,edit})
+                    //   verb:id         (legacy publish-only format)
+                    let parts: Vec<&str> = data.splitn(3, ':').collect();
+                    let (verdict, mode, id) = match parts.as_slice() {
+                        ["approve", mode, id] => (Some(true), ApprovalMode::parse(mode), id.to_string()),
+                        ["reject", mode, id] => (Some(false), ApprovalMode::parse(mode), id.to_string()),
+                        ["approve", id] => (Some(true), Some(ApprovalMode::Publish), id.to_string()),
+                        ["reject", id] => (Some(false), Some(ApprovalMode::Publish), id.to_string()),
+                        _ => (None, None, String::new()),
                     };
                     let actor = cb.from.as_ref().map(|f| f.display()).unwrap_or_else(|| "?".into());
 
-                    if verdict.is_none() {
+                    if verdict.is_none() || mode.is_none() {
                         let _ = tg.answer_callback(&cb.id, Some("données inconnues")).await;
                         continue;
                     }
+                    let mode = mode.unwrap();
+                    // Route key prefixes mode so publish and edit approvals
+                    // for the same discord message never collide.
+                    let slot_key = format!("{}:{id}", mode.as_str());
 
-                    let slot = ctx.pending_approvals.lock().await.remove(&id);
+                    let slot = ctx.pending_approvals.lock().await.remove(&slot_key);
                     let _ = tg
                         .answer_callback(&cb.id, Some(if verdict == Some(true) { "approuvé" } else { "refusé" }))
                         .await;
@@ -875,15 +1001,17 @@ async fn run_telegram_updates(ctx: AppCtx) {
     }
 }
 
-/// Runs one approval round: send the preview, wait on the oneshot (or time
-/// out), edit the Telegram message to reflect the decision, log it.
+/// Runs one approval round. The `mode` parameter picks the copy, button
+/// labels, and callback prefix so publish and edit approvals travel through
+/// the same machinery without stepping on each other.
 async fn run_approval(
     ctx: AppCtx,
     tg: Arc<telegram::Client>,
     chat_id: i64,
-    key: String,
+    discord_msg_id: String,
     caption: String,
     image_path: PathBuf,
+    mode: ApprovalMode,
 ) {
     let (img_bytes, filename) = match telegram::read_image(&image_path) {
         Ok(pair) => pair,
@@ -897,23 +1025,58 @@ async fn run_approval(
         }
     };
 
+    let slot_key = format!("{}:{discord_msg_id}", mode.as_str());
+    let (intro, button_yes, button_no, approved_text, rejected_text, timeout_text, log_tag) = match mode {
+        ApprovalMode::Publish => (
+            "📬 Aperçu à valider avant publication Instagram :",
+            "✅ Publier sur Instagram",
+            "❌ Annuler",
+            "publication Instagram à venir",
+            "rien ne sera publié",
+            "aucune publication n'aura lieu",
+            "publication",
+        ),
+        ApprovalMode::EditCaption => (
+            "✏️ L'annonce Discord a été modifiée.\nMettre à jour la description Instagram (sans supprimer le post) ?",
+            "✅ Mettre à jour",
+            "❌ Ignorer",
+            "mise à jour Instagram à venir",
+            "la description Instagram restera inchangée",
+            "la description ne sera pas mise à jour",
+            "édition",
+        ),
+    };
+
     // Register the sender BEFORE sending so there's no race where the user
     // clicks between send and insert.
     let (tx, rx) = tokio::sync::oneshot::channel();
-    ctx.pending_approvals.lock().await.insert(key.clone(), tx);
+    ctx.pending_approvals.lock().await.insert(slot_key.clone(), tx);
 
-    let message_id = match tg.send_preview(chat_id, &caption, img_bytes, &filename, &key).await {
+    let message_id = match tg
+        .send_preview_with_mode(
+            chat_id,
+            intro,
+            &caption,
+            img_bytes,
+            &filename,
+            &format!("approve:{}:{discord_msg_id}", mode.as_str()),
+            &format!("reject:{}:{discord_msg_id}", mode.as_str()),
+            button_yes,
+            button_no,
+        )
+        .await
+    {
         Ok(id) => id,
         Err(e) => {
             push_log(&ctx.poller_log, &format!("approval: send failed: {e}")).await;
-            ctx.pending_approvals.lock().await.remove(&key);
+            ctx.pending_approvals.lock().await.remove(&slot_key);
             return;
         }
     };
 
     push_log(
         &ctx.poller_log,
-        &format!("approval envoyée pour {key} (msg {message_id})"),
+        &format!("approval {log_tag} envoyée pour {discord_msg_id} (msg {message_id})"),
     )
     .await;
 
@@ -921,46 +1084,100 @@ async fn run_approval(
         Ok(Ok(ApprovalOutcome::Approved { by })) => {
             push_log(
                 &ctx.poller_log,
-                &format!("approval ✅ {key} par @{by} — (publication Instagram à venir)"),
+                &format!("approval {log_tag} ✅ {discord_msg_id} par @{by} — ({approved_text})"),
             )
             .await;
             let _ = tg
                 .edit_message(
                     chat_id,
                     message_id,
-                    &format!("✅ Approuvé par @{by} — publication Instagram à venir."),
+                    &format!("✅ Approuvé par @{by} — {approved_text}."),
                 )
                 .await;
         }
         Ok(Ok(ApprovalOutcome::Rejected { by })) => {
             push_log(
                 &ctx.poller_log,
-                &format!("approval ❌ {key} par @{by} — abandon"),
+                &format!("approval {log_tag} ❌ {discord_msg_id} par @{by} — abandon"),
             )
             .await;
             let _ = tg
                 .edit_message(
                     chat_id,
                     message_id,
-                    &format!("❌ Refusé par @{by} — rien ne sera publié."),
+                    &format!("❌ Refusé par @{by} — {rejected_text}."),
                 )
                 .await;
         }
         _ => {
             push_log(
                 &ctx.poller_log,
-                &format!("approval ⏱ {key} — délai dépassé, rien publié"),
+                &format!("approval {log_tag} ⏱ {discord_msg_id} — délai dépassé"),
             )
             .await;
-            ctx.pending_approvals.lock().await.remove(&key);
+            ctx.pending_approvals.lock().await.remove(&slot_key);
             let _ = tg
                 .edit_message(
                     chat_id,
                     message_id,
-                    "⏱ Délai dépassé — aucune publication n'aura lieu.",
+                    &format!("⏱ Délai dépassé — {timeout_text}."),
                 )
                 .await;
         }
+    }
+}
+
+/// Consumes edit IDs pushed by the gateway / manual endpoint, fetches the
+/// updated message via REST, and runs an edit-mode approval.
+async fn run_edit_watcher(ctx: AppCtx, mut rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
+    while let Some(msg_id) = rx.recv().await {
+        let Some(tg) = ctx.telegram.clone() else { continue };
+        let Some(chat_id) = ctx.config.telegram_chat_id else { continue };
+
+        // Fetch the updated message body. The MESSAGE_UPDATE gateway event
+        // doesn't carry content without the privileged MESSAGE_CONTENT
+        // intent, so REST is the source of truth.
+        let msg = match ctx.client.fetch_message(&ctx.config.channel_id, &msg_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                push_log(
+                    &ctx.poller_log,
+                    &format!("edit: fetch {msg_id} failed: {e}"),
+                )
+                .await;
+                continue;
+            }
+        };
+
+        let raw = msg.synthesized_body();
+        let user_map = AppState::load(&ctx.config.state_path).handles;
+        let caption = discord_to_caption(&raw, &user_map);
+        let Some(image_path) = images::parse_distance_km(&raw)
+            .and_then(|km| images::image_for_distance(ctx.config.images_dir.as_path(), km))
+        else {
+            push_log(
+                &ctx.poller_log,
+                &format!(
+                    "edit: pas d'image pour {msg_id} — validation d'édition sautée"
+                ),
+            )
+            .await;
+            continue;
+        };
+
+        let ctx2 = ctx.clone();
+        tokio::spawn(async move {
+            run_approval(
+                ctx2,
+                tg,
+                chat_id,
+                msg_id,
+                caption,
+                image_path,
+                ApprovalMode::EditCaption,
+            )
+            .await;
+        });
     }
 }
 

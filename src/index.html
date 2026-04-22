@@ -738,8 +738,16 @@
                       hx-include="#convert-form"
                       hx-target="#approval-status"
                       hx-swap="innerHTML"
-                      title="Envoyer l’aperçu vers le groupe Telegram pour validation">
+                      title="Envoyer l’aperçu vers le groupe Telegram pour validation initiale">
                 Envoyer pour approbation
+              </button>
+              <button type="button" class="press"
+                      hx-post="/api/telegram/request_edit"
+                      hx-include="#convert-form"
+                      hx-target="#approval-status"
+                      hx-swap="innerHTML"
+                      title="Demander au groupe Telegram de valider la mise à jour de la description Instagram">
+                Tester la modification
               </button>
               <span id="approval-status" class="badge muted">en attente d’envoi</span>
               <span id="char-counter">0 / 2200</span>
