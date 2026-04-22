@@ -659,6 +659,9 @@
       <label>Bot</label>
       <span id="gateway-status" hx-get="/api/gateway/status" hx-trigger="load, every 5s">…</span>
       <span class="strip-sep"></span>
+      <label>Télégramme</label>
+      <span id="telegram-status" hx-get="/api/telegram/status" hx-trigger="load, every 30s">…</span>
+      <span class="strip-sep"></span>
       <label>Salon</label>
       <span class="cue" id="channel-id-chip">…</span>
       <span class="strip-sep"></span>
@@ -730,6 +733,15 @@
           <label>
             <span>Épreuve Instagram</span>
             <span class="compose-actions">
+              <button type="button" class="press"
+                      hx-post="/api/telegram/request"
+                      hx-include="#convert-form"
+                      hx-target="#approval-status"
+                      hx-swap="innerHTML"
+                      title="Envoyer l’aperçu vers le groupe Telegram pour validation">
+                Envoyer pour approbation
+              </button>
+              <span id="approval-status" class="badge muted">en attente d’envoi</span>
               <span id="char-counter">0 / 2200</span>
             </span>
           </label>

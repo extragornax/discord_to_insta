@@ -2,6 +2,7 @@ mod discord;
 mod gateway;
 mod images;
 mod state;
+mod telegram;
 mod transform;
 
 use axum::{
@@ -32,6 +33,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const REACT_DELAY: Duration = Duration::from_secs(1);
 const REACTION_EMOJIS: &[&str] = &["✅", "🚫", "🤔"];
 const LOG_MAX_LINES: usize = 40;
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(2 * 3600); // 2 hours
 const INDEX_HTML: &str = include_str!("index.html");
 
 /// Seeded on first launch if `AppState.handles` is empty. The user can edit
@@ -49,6 +51,14 @@ struct Config {
     guild_id: String,
     images_dir: PathBuf,
     state_path: PathBuf,
+    telegram_token: String,
+    telegram_chat_id: Option<i64>,
+}
+
+impl Config {
+    fn telegram_enabled(&self) -> bool {
+        !self.telegram_token.is_empty() && self.telegram_chat_id.is_some()
+    }
 }
 
 struct PollerHandle {
@@ -71,6 +81,20 @@ struct AppCtx {
     /// the same file; this serializes them so one side's changes can't
     /// stomp the other's between its read and its write.
     state_write_lock: Arc<Mutex<()>>,
+    /// The Telegram client (if configured). Cloned into tasks; cheap.
+    telegram: Option<Arc<telegram::Client>>,
+    /// Approval sessions in flight, keyed by Discord message id. The
+    /// updates-loop pops the oneshot sender when a callback arrives and
+    /// delivers the decision. Lost on restart — Telegram messages with
+    /// buttons still exist; stale clicks just get a "session expired"
+    /// toast and are ignored.
+    pending_approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>>>,
+}
+
+#[derive(Debug, Clone)]
+enum ApprovalOutcome {
+    Approved { by: String },
+    Rejected { by: String },
 }
 
 #[tokio::main]
@@ -86,6 +110,10 @@ async fn main() {
             Ok(s) if !s.is_empty() => PathBuf::from(s),
             _ => state::default_path(),
         },
+        telegram_token: std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
+        telegram_chat_id: std::env::var("TELEGRAM_APPROVAL_CHAT_ID")
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok()),
     });
 
     if config.token.is_empty() {
@@ -116,6 +144,21 @@ async fn main() {
         .cloned();
 
     let client = Arc::new(Client::new(config.token.clone()));
+    let telegram = if config.telegram_enabled() {
+        Some(Arc::new(telegram::Client::new(config.telegram_token.clone())))
+    } else {
+        if !config.telegram_token.is_empty() || config.telegram_chat_id.is_some() {
+            eprintln!(
+                "warning: Telegram partially configured (token={} chat_id={}); approvals disabled",
+                !config.telegram_token.is_empty(),
+                config.telegram_chat_id.is_some()
+            );
+        } else {
+            println!("Telegram not configured — approvals step skipped");
+        }
+        None
+    };
+
     let ctx = AppCtx {
         config: config.clone(),
         client,
@@ -125,7 +168,16 @@ async fn main() {
         gateway_connected: Arc::new(AtomicBool::new(false)),
         poll_trigger: Arc::new(tokio::sync::Notify::new()),
         state_write_lock: Arc::new(Mutex::new(())),
+        telegram: telegram.clone(),
+        pending_approvals: Arc::new(Mutex::new(HashMap::new())),
     };
+
+    // Telegram updates loop: long-polls getUpdates and routes callback_query
+    // clicks back to whichever approval task is waiting.
+    if telegram.is_some() {
+        let ctx_for_tg = ctx.clone();
+        tokio::spawn(async move { run_telegram_updates(ctx_for_tg).await });
+    }
 
     // Gateway task: holds a WebSocket to Discord so the bot shows as online,
     // and fires ctx.poll_trigger on every MESSAGE_CREATE in our channel so
@@ -160,6 +212,8 @@ async fn main() {
         .route("/api/poller/running", get(api_poller_running))
         .route("/api/poller/log", get(api_poller_log))
         .route("/api/gateway/status", get(api_gateway_status))
+        .route("/api/telegram/status", get(api_telegram_status))
+        .route("/api/telegram/request", post(api_telegram_request))
         .nest_service("/images", ServeDir::new(config.images_dir.clone()))
         .with_state(ctx);
 
@@ -295,6 +349,61 @@ async fn api_gateway_status(State(ctx): State<AppCtx>) -> Html<&'static str> {
     } else {
         Html(r#"<span class="badge muted">offline</span>"#)
     }
+}
+
+async fn api_telegram_status(State(ctx): State<AppCtx>) -> Html<&'static str> {
+    if ctx.telegram.is_some() {
+        Html(r#"<span class="badge ok">prêt</span>"#)
+    } else {
+        Html(r#"<span class="badge muted">non-configuré</span>"#)
+    }
+}
+
+/// Manual approval request from the UI: takes the current source + handles
+/// (from form data), computes the caption server-side, resolves the per-
+/// distance image, and spawns the approval flow. Returns a one-line status
+/// HTML fragment.
+async fn api_telegram_request(
+    State(ctx): State<AppCtx>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Html<String> {
+    let Some(tg) = ctx.telegram.clone() else {
+        return Html(r#"<span class="badge muted">Telegram non-configuré</span>"#.into());
+    };
+    let Some(chat_id) = ctx.config.telegram_chat_id else {
+        return Html(r#"<span class="badge muted">TELEGRAM_APPROVAL_CHAT_ID manquant</span>"#.into());
+    };
+
+    let raw = form.get("raw").cloned().unwrap_or_default();
+    if raw.trim().is_empty() {
+        return Html(r#"<span class="badge warn">rien à approuver — saisissez une source d'abord</span>"#.into());
+    }
+
+    let user_map = AppState::load(&ctx.config.state_path).handles;
+    let caption = discord_to_caption(&raw, &user_map);
+    let image = images::parse_distance_km(&raw)
+        .and_then(|km| images::image_for_distance(ctx.config.images_dir.as_path(), km));
+    let Some(image_path) = image else {
+        return Html(r#"<span class="badge warn">pas d'image — distance manquante ou gabarit introuvable</span>"#.into());
+    };
+
+    // Use a synthetic discord_msg_id for manual requests so callbacks still
+    // route cleanly. Stamped with nanoseconds to avoid collisions across
+    // rapid-fire manual triggers.
+    let synthetic_id = format!(
+        "manual-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+
+    let ctx2 = ctx.clone();
+    let tg2 = tg.clone();
+    tokio::spawn(async move {
+        run_approval(ctx2, tg2, chat_id, synthetic_id, caption, image_path).await;
+    });
+    Html(r#"<span class="badge ok">envoyé — en attente d'approbation sur Telegram</span>"#.into())
 }
 
 async fn api_handles_get(State(ctx): State<AppCtx>) -> Html<String> {
@@ -625,11 +734,215 @@ async fn handle_batch(ctx: &AppCtx, messages: Vec<Message>) -> std::io::Result<(
             persisted.clear_reactions(&ctx.config.channel_id, &msg.id);
             persisted.save(&ctx.config.state_path)?;
             *ctx.last_seen_id.lock().await = Some(msg.id.clone());
+
+            // Kick off the Telegram approval flow for this message if
+            // configured. Fire-and-forget — the poller shouldn't block for
+            // up to 2 hours waiting on a human.
+            if let (Some(tg), Some(chat_id)) =
+                (ctx.telegram.clone(), ctx.config.telegram_chat_id)
+            {
+                let raw = msg.synthesized_body();
+                let handles = persisted.handles.clone();
+                let caption = discord_to_caption(&raw, &handles);
+                let image = images::parse_distance_km(&raw).and_then(|km| {
+                    images::image_for_distance(ctx.config.images_dir.as_path(), km)
+                });
+                match image {
+                    Some(image_path) => {
+                        let ctx_for_approval = ctx.clone();
+                        let key = msg.id.clone();
+                        tokio::spawn(async move {
+                            run_approval(
+                                ctx_for_approval,
+                                tg,
+                                chat_id,
+                                key,
+                                caption,
+                                image_path,
+                            )
+                            .await;
+                        });
+                    }
+                    None => {
+                        push_log(
+                            &ctx.poller_log,
+                            &format!(
+                                "approval: pas d'image pour {} — étape d'approbation sautée",
+                                msg.id
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
         } else {
             break;
         }
     }
     Ok(())
+}
+
+// ---------- Telegram approval ---------------------------------------------
+
+/// Long-polls getUpdates and dispatches any callback_query to whichever
+/// approval task is waiting. Survives transient errors with a backoff.
+async fn run_telegram_updates(ctx: AppCtx) {
+    let Some(tg) = ctx.telegram.clone() else { return };
+    let mut offset: Option<i64> = None;
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match tg.get_updates(offset).await {
+            Ok(updates) => {
+                backoff = Duration::from_secs(1);
+                for u in updates {
+                    // Advance the offset past every update we've seen so we
+                    // don't re-process them.
+                    offset = Some(u.update_id + 1);
+                    let Some(cb) = u.callback_query else { continue };
+                    let data = cb.data.as_deref().unwrap_or("");
+                    let (verdict, id) = match data.split_once(':') {
+                        Some(("approve", id)) => (Some(true), id.to_string()),
+                        Some(("reject", id)) => (Some(false), id.to_string()),
+                        _ => (None, String::new()),
+                    };
+                    let actor = cb.from.as_ref().map(|f| f.display()).unwrap_or_else(|| "?".into());
+
+                    if verdict.is_none() {
+                        let _ = tg.answer_callback(&cb.id, Some("données inconnues")).await;
+                        continue;
+                    }
+
+                    let slot = ctx.pending_approvals.lock().await.remove(&id);
+                    let _ = tg
+                        .answer_callback(&cb.id, Some(if verdict == Some(true) { "approuvé" } else { "refusé" }))
+                        .await;
+                    match slot {
+                        Some(tx) => {
+                            let outcome = if verdict == Some(true) {
+                                ApprovalOutcome::Approved { by: actor.clone() }
+                            } else {
+                                ApprovalOutcome::Rejected { by: actor.clone() }
+                            };
+                            // Deliver the decision. If the awaiter was dropped
+                            // (e.g. the task timed out moments earlier), we
+                            // silently ignore the send error.
+                            let _ = tx.send(outcome);
+                        }
+                        None => {
+                            // Stale click — either a restart lost the state
+                            // or the task already timed out. Reflect that in
+                            // the message so the group isn't confused.
+                            if let Some(msg) = cb.message.as_ref() {
+                                let _ = tg
+                                    .edit_message(
+                                        msg.chat.id,
+                                        msg.message_id,
+                                        &format!(
+                                            "⏱ Session d'approbation expirée — plus aucune publication en attente pour cet aperçu. (clic par @{actor})"
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                push_log(&ctx.poller_log, &format!("telegram updates: {e}")).await;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+            }
+        }
+    }
+}
+
+/// Runs one approval round: send the preview, wait on the oneshot (or time
+/// out), edit the Telegram message to reflect the decision, log it.
+async fn run_approval(
+    ctx: AppCtx,
+    tg: Arc<telegram::Client>,
+    chat_id: i64,
+    key: String,
+    caption: String,
+    image_path: PathBuf,
+) {
+    let (img_bytes, filename) = match telegram::read_image(&image_path) {
+        Ok(pair) => pair,
+        Err(e) => {
+            push_log(
+                &ctx.poller_log,
+                &format!("approval: failed to read image {}: {e}", image_path.display()),
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Register the sender BEFORE sending so there's no race where the user
+    // clicks between send and insert.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    ctx.pending_approvals.lock().await.insert(key.clone(), tx);
+
+    let message_id = match tg.send_preview(chat_id, &caption, img_bytes, &filename, &key).await {
+        Ok(id) => id,
+        Err(e) => {
+            push_log(&ctx.poller_log, &format!("approval: send failed: {e}")).await;
+            ctx.pending_approvals.lock().await.remove(&key);
+            return;
+        }
+    };
+
+    push_log(
+        &ctx.poller_log,
+        &format!("approval envoyée pour {key} (msg {message_id})"),
+    )
+    .await;
+
+    match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
+        Ok(Ok(ApprovalOutcome::Approved { by })) => {
+            push_log(
+                &ctx.poller_log,
+                &format!("approval ✅ {key} par @{by} — (publication Instagram à venir)"),
+            )
+            .await;
+            let _ = tg
+                .edit_message(
+                    chat_id,
+                    message_id,
+                    &format!("✅ Approuvé par @{by} — publication Instagram à venir."),
+                )
+                .await;
+        }
+        Ok(Ok(ApprovalOutcome::Rejected { by })) => {
+            push_log(
+                &ctx.poller_log,
+                &format!("approval ❌ {key} par @{by} — abandon"),
+            )
+            .await;
+            let _ = tg
+                .edit_message(
+                    chat_id,
+                    message_id,
+                    &format!("❌ Refusé par @{by} — rien ne sera publié."),
+                )
+                .await;
+        }
+        _ => {
+            push_log(
+                &ctx.poller_log,
+                &format!("approval ⏱ {key} — délai dépassé, rien publié"),
+            )
+            .await;
+            ctx.pending_approvals.lock().await.remove(&key);
+            let _ = tg
+                .edit_message(
+                    chat_id,
+                    message_id,
+                    "⏱ Délai dépassé — aucune publication n'aura lieu.",
+                )
+                .await;
+        }
+    }
 }
 
 async fn push_log(log: &Mutex<VecDeque<String>>, line: &str) {

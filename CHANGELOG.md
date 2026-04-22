@@ -44,6 +44,19 @@ All notable changes to this project are recorded here. Format loosely follows [K
 - `README.md`: project overview, quick-start (docker and cargo), full env-var table, post-image naming convention, auto-react semantics, security note on the unauth'd web UI, known caption-transform limits, and a file-tree cheat sheet. — 2026-04-22
 - `.github/workflows/deploy.yml`: CI deploy. Triggers on push to `master`/`main` (plus `workflow_dispatch`), SSHes into the target via `appleboy/ssh-action@v1.2.0`, runs `git pull --ff-only` and `docker compose up -d --build`, then `docker image prune -f` to avoid layer bloat. `concurrency: deploy` serializes deploys. Requires secrets `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`, `DEPLOY_PATH` (+ optional `SSH_PORT`). README gained a matching "Deployment" section documenting one-time server setup. — 2026-04-22
 
+### Added (Telegram approval gate)
+- `src/telegram.rs` (new): minimal Bot API client — `sendPhoto` (multipart), `sendMessage` with inline keyboard, `getUpdates` long-polling (25 s), `answerCallbackQuery`, `editMessageText`. Typed Update / CallbackQuery / CallbackFrom deserializers. Three unit tests. — 2026-04-22
+- `Cargo.toml`: added the `multipart` feature to reqwest. — 2026-04-22
+- `src/main.rs`:
+  - `Config.telegram_token` + `Config.telegram_chat_id` read from `TELEGRAM_BOT_TOKEN` and `TELEGRAM_APPROVAL_CHAT_ID`. Empty / partial config disables the approval gate (partial is loud, complete absence is quiet). — 2026-04-22
+  - `AppCtx.telegram` (shared `telegram::Client`) + `AppCtx.pending_approvals` (`HashMap<discord_msg_id, oneshot::Sender<ApprovalOutcome>>`). `run_telegram_updates` task long-polls `getUpdates` and routes `callback_query` decisions to the waiting approval task; unknown IDs get acked with "session expired" and the message is edited to say so. — 2026-04-22
+  - `run_approval()` sends the image + caption + inline keyboard to the approval chat, waits on the oneshot with a 2-hour timeout, and edits the message to reflect ✅ / ❌ / ⏱. For now the approved outcome only logs `"publication Instagram à venir"` — the publishing step is next slice. — 2026-04-22
+  - Triggered automatically by the poller after successful reactions for each new message; also exposed manually via `POST /api/telegram/request` for operator testing. — 2026-04-22
+  - New routes: `GET /api/telegram/status` (HTML badge for the topbar) and `POST /api/telegram/request`. — 2026-04-22
+- `src/index.html`: new `Télégramme` status chip in the topbar; new `Envoyer pour approbation` button + `#approval-status` badge in § II Laboratoire. — 2026-04-22
+- `.env.example`: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_APPROVAL_CHAT_ID` with BotFather / chat-ID-lookup instructions. — 2026-04-22
+- `CLAUDE.md`: new "Telegram approval gate" section under Secrets & External Services. — 2026-04-22
+
 ### Added (caption-transform hardening)
 - `src/transform.rs`: three new transform steps applied after mention rewriting:
   - **Custom Discord emojis** `<:name:id>` / `<a:name:id>` → `:name:` (readable fallback, keeps intent).

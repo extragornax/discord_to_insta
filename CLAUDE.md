@@ -148,3 +148,13 @@ The project will need Discord bot credentials and Instagram Graph API credential
 - The UI's Répertoire panel and the poller both write state.json. `AppCtx.state_write_lock` (a `tokio::sync::Mutex<()>`) serializes any load-mutate-save cycle so their changes can't clobber each other. Every caller must acquire it before `AppState::load` + `.save()`.
 - `DEFAULT_HANDLES` in `src/main.rs` seeds three known mappings (bertrandbernager / extragornax / mithiriath) on first launch when `state.handles` is empty. Operator deletes are preserved — re-seed only fires when the whole map is empty again.
 - The poller **auto-starts on launch** when `DISCORD_BOT_TOKEN` is set — the app is meant to keep reacting unattended (this is a docker-compose service, not a desktop tool). The UI checkbox still toggles it at runtime. Token empty → poller skipped silently to avoid a 401 log spam.
+
+### Telegram approval gate
+
+- `src/telegram.rs` is a minimal transport-only Bot API client (sendPhoto, sendMessage with inline keyboard, getUpdates long-polling, answerCallbackQuery, editMessageText). No bot framework, no event loop beyond a single tokio task.
+- Flow: when the poller finishes its reactions for a new announcement, it spawns `run_approval()`, which posts the image + caption + `✅ Publier / ❌ Annuler` buttons to the configured group and waits on a `tokio::sync::oneshot` with a 2-hour timeout.
+- The gate is **optional**: if `TELEGRAM_BOT_TOKEN` or `TELEGRAM_APPROVAL_CHAT_ID` is empty, `Config::telegram_enabled()` is false and approvals are skipped entirely. Partial configuration logs a warning at startup.
+- Long-polling (`getUpdates` with a 25 s timeout) avoids the need for a public HTTPS URL for webhooks. One background task, one backoff-on-error loop, `allowed_updates: ["callback_query"]` so unrelated chat traffic is ignored.
+- Pending approvals are in-memory (`AppCtx.pending_approvals: HashMap<discord_msg_id, oneshot::Sender<ApprovalOutcome>>`). Restart means pending approvals are lost; a subsequent button click is acked with "session expired" and the message is edited to reflect that.
+- The UI has a manual **Envoyer pour approbation** button in § II Laboratoire that posts the current editor state to `/api/telegram/request`, letting operators test the flow without waiting for a new Discord announcement.
+- **Instagram publishing is not yet wired**: approvals currently only log the decision. The publish step will slot in where the log line currently reads "publication Instagram à venir".

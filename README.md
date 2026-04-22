@@ -13,6 +13,7 @@ Built for the Mayo Jaune cycling group's weekly ride posts, but the transformati
 - **2,200-char counter.** Instagram's caption cap is enforced visibly — the counter turns red if you go over.
 - **No JS build step.** Frontend is one static HTML file + htmx from CDN.
 - **Bot shows online.** A minimal Gateway WebSocket runs alongside the REST client so the bot has the green-dot presence Discord users expect.
+- **Human-in-the-loop via Telegram.** Optional approval gate: every new announcement posts a preview (image + caption + ✅/❌ buttons) to a Telegram group. Nothing publishes to Instagram unless someone in the group approves. Runs via long-polling — no public webhook URL required.
 
 ## Stack
 
