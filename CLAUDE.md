@@ -78,7 +78,14 @@ The project will need Discord bot credentials and Instagram Graph API credential
 
 ### Discord
 
-- Env var: `DISCORD_BOT_TOKEN` — read at startup by `App::new()`. If unset, the UI exposes a masked password field as a fallback. The token is never persisted to disk. A template sits at `.env.example`; copy to `.env` (gitignored) and `source` it before running — the app itself does not auto-load `.env`.
+- Env vars (all read in `App::new()`; the UI fields are pre-populated from these):
+  - `DISCORD_BOT_TOKEN` — bot auth. UI has a masked fallback field. Never persisted.
+  - `DISCORD_CHANNEL_ID` — the target announcement channel. Falls back to `DEFAULT_CHANNEL_ID`.
+  - `DISCORD_GUILD_ID` — the guild (server) the channel lives in. Used only to build the "open in Discord" hyperlink.
+  - `DISCORD_TO_INSTA_IMAGES_DIR` (optional) — overrides the default `images/` path. Useful when running in a container with a volume mount.
+  - `DISCORD_TO_INSTA_STATE_PATH` (optional) — overrides the default XDG state-file path.
+- `.env` loading: `dotenvy::dotenv()` runs once at `main()` start. Missing `.env` is not an error (vars may come from docker-compose `env_file:` or the ambient environment). Ambient env wins over `.env`.
+- Template lives at `.env.example`; `.env` is gitignored.
 - Target channel defaults to `981806074233507880` (Mayo Jaune announcements, guild `981525647891525642`). It's only a UI default — the field is editable. Update `DEFAULT_CHANNEL_ID` in `src/main.rs` if the canonical channel ever changes.
 - Ingestion is REST-only (`GET /channels/{id}/messages`) via `ureq`. No gateway, no tokio runtime — fetches run on a `std::thread` and stream results back through an `mpsc` channel so the egui event loop never blocks.
 - The bot needs `View Channel` + `Read Message History` on the announcement channel. For the auto-react poller, it additionally needs `Add Reactions`. No privileged intents required since we're not using the gateway.

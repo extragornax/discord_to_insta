@@ -7,7 +7,7 @@ use discord::{Client, Message};
 use eframe::egui;
 use state::AppState;
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::Arc;
@@ -16,13 +16,18 @@ use std::time::Duration;
 use transform::discord_to_caption;
 
 const DEFAULT_CHANNEL_ID: &str = "981806074233507880"; // Mayo Jaune announcements
+const DEFAULT_GUILD_ID: &str = "981525647891525642"; // Mayo Jaune guild (server)
 const DEFAULT_FETCH_LIMIT: u32 = 50;
-const IMAGES_DIR: &str = "images";
+const DEFAULT_IMAGES_DIR: &str = "images";
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const REACTION_EMOJIS: &[&str] = &["✅", "🚫", "🤔"];
 const LOG_MAX_LINES: usize = 20;
 
 fn main() -> eframe::Result<()> {
+    // Non-fatal: missing .env is fine (vars may come from docker-compose env_file
+    // or the ambient environment).
+    let _ = dotenvy::dotenv();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 820.0]),
         ..Default::default()
@@ -35,6 +40,13 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(App::new()))
         }),
     )
+}
+
+fn env_or(key: &str, fallback: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 type FetchResult = Result<Vec<Message>, discord::Error>;
@@ -60,6 +72,8 @@ impl PollerHandle {
 struct App {
     token: String,
     channel_id: String,
+    guild_id: String,
+    images_dir: PathBuf,
     raw: String,
     user_map_rows: Vec<(String, String)>,
     messages: Vec<Message>,
@@ -86,13 +100,20 @@ enum Status {
 impl App {
     fn new() -> Self {
         let token = std::env::var("DISCORD_BOT_TOKEN").unwrap_or_default();
-        let state_path = state::default_path();
+        let channel_id = env_or("DISCORD_CHANNEL_ID", DEFAULT_CHANNEL_ID);
+        let guild_id = env_or("DISCORD_GUILD_ID", DEFAULT_GUILD_ID);
+        let images_dir = PathBuf::from(env_or("DISCORD_TO_INSTA_IMAGES_DIR", DEFAULT_IMAGES_DIR));
+        let state_path = match std::env::var("DISCORD_TO_INSTA_STATE_PATH") {
+            Ok(s) if !s.is_empty() => PathBuf::from(s),
+            _ => state::default_path(),
+        };
         let state = AppState::load(&state_path);
-        let channel_id = DEFAULT_CHANNEL_ID.to_string();
         let last_seen_id = state.last_reacted_by_channel.get(&channel_id).cloned();
         Self {
             token,
             channel_id,
+            guild_id,
+            images_dir,
             raw: String::new(),
             user_map_rows: vec![(String::new(), String::new())],
             messages: Vec::new(),
@@ -301,7 +322,13 @@ impl eframe::App for App {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.channel_id)
                         .hint_text("Discord channel ID")
-                        .desired_width(200.0),
+                        .desired_width(180.0),
+                );
+                ui.label("Guild ID:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.guild_id)
+                        .hint_text("Discord guild/server ID")
+                        .desired_width(180.0),
                 );
                 let fetching = matches!(self.fetch_status, Status::Fetching);
                 let btn = ui.add_enabled(
@@ -439,7 +466,7 @@ impl eframe::App for App {
             let caption = discord_to_caption(&self.raw, &self.user_map());
             let distance_km = images::parse_distance_km(&self.raw);
             let image_path = distance_km
-                .and_then(|km| images::image_for_distance(Path::new(IMAGES_DIR), km));
+                .and_then(|km| images::image_for_distance(self.images_dir.as_path(), km));
 
             ui.heading("discord_to_insta");
             ui.horizontal(|ui| {
@@ -456,7 +483,9 @@ impl eframe::App for App {
                             egui::Color32::from_rgb(220, 160, 60),
                             format!(
                                 "⚠ {} km detected but no image found in {}/ (expected *_{}.png)",
-                                km, IMAGES_DIR, km
+                                km,
+                                self.images_dir.display(),
+                                km
                             ),
                         );
                     }
@@ -494,6 +523,19 @@ impl eframe::App for App {
                             ctx.copy_text(caption.clone());
                             self.last_copy_status =
                                 Some(format!("copied {} chars", caption.chars().count()));
+                        }
+                        if let (Some(msg_id), false, false) = (
+                            &self.selected_message_id,
+                            self.guild_id.trim().is_empty(),
+                            self.channel_id.trim().is_empty(),
+                        ) {
+                            let url = format!(
+                                "https://discord.com/channels/{}/{}/{}",
+                                self.guild_id.trim(),
+                                self.channel_id.trim(),
+                                msg_id
+                            );
+                            ui.hyperlink_to("↗ open in Discord", url);
                         }
                         if let Some(status) = &self.last_copy_status {
                             ui.small(status);
