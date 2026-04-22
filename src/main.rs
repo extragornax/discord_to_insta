@@ -3,43 +3,312 @@ mod images;
 mod state;
 mod transform;
 
+use axum::{
+    Json, Router,
+    extract::{Form, State},
+    http::StatusCode,
+    response::{Html, IntoResponse},
+    routing::{get, post},
+};
 use discord::{Client, Message};
-use eframe::egui;
+use serde::Serialize;
 use state::AppState;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::Arc;
-use std::thread;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::sync::Mutex;
+use tower_http::services::ServeDir;
 use transform::discord_to_caption;
 
-const DEFAULT_CHANNEL_ID: &str = "981806074233507880"; // Mayo Jaune announcements
-const DEFAULT_GUILD_ID: &str = "981525647891525642"; // Mayo Jaune guild (server)
-const DEFAULT_FETCH_LIMIT: u32 = 50;
+const DEFAULT_CHANNEL_ID: &str = "981806074233507880";
+const DEFAULT_GUILD_ID: &str = "981525647891525642";
 const DEFAULT_IMAGES_DIR: &str = "images";
+const DEFAULT_PORT: u16 = 8080;
+const DEFAULT_FETCH_LIMIT: u32 = 50;
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const REACTION_EMOJIS: &[&str] = &["✅", "🚫", "🤔"];
-const LOG_MAX_LINES: usize = 20;
+const LOG_MAX_LINES: usize = 40;
+const INDEX_HTML: &str = include_str!("index.html");
 
-fn main() -> eframe::Result<()> {
-    // Non-fatal: missing .env is fine (vars may come from docker-compose env_file
-    // or the ambient environment).
+struct Config {
+    token: String,
+    channel_id: String,
+    guild_id: String,
+    images_dir: PathBuf,
+    state_path: PathBuf,
+}
+
+struct PollerHandle {
+    stop_flag: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct AppCtx {
+    config: Arc<Config>,
+    client: Arc<Client>,
+    poller_log: Arc<Mutex<VecDeque<String>>>,
+    poller: Arc<Mutex<Option<PollerHandle>>>,
+    last_seen_id: Arc<Mutex<Option<String>>>,
+}
+
+#[tokio::main]
+async fn main() {
     let _ = dotenvy::dotenv();
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 820.0]),
-        ..Default::default()
+    let config = Arc::new(Config {
+        token: std::env::var("DISCORD_BOT_TOKEN").unwrap_or_default(),
+        channel_id: env_or("DISCORD_CHANNEL_ID", DEFAULT_CHANNEL_ID),
+        guild_id: env_or("DISCORD_GUILD_ID", DEFAULT_GUILD_ID),
+        images_dir: PathBuf::from(env_or("DISCORD_TO_INSTA_IMAGES_DIR", DEFAULT_IMAGES_DIR)),
+        state_path: match std::env::var("DISCORD_TO_INSTA_STATE_PATH") {
+            Ok(s) if !s.is_empty() => PathBuf::from(s),
+            _ => state::default_path(),
+        },
+    });
+
+    if config.token.is_empty() {
+        eprintln!("warning: DISCORD_BOT_TOKEN is empty — fetch and auto-react will fail until set");
+    }
+
+    let state_data = AppState::load(&config.state_path);
+    let last_seen = state_data
+        .last_reacted_by_channel
+        .get(&config.channel_id)
+        .cloned();
+
+    let client = Arc::new(Client::new(config.token.clone()));
+    let ctx = AppCtx {
+        config: config.clone(),
+        client,
+        poller_log: Arc::new(Mutex::new(VecDeque::new())),
+        poller: Arc::new(Mutex::new(None)),
+        last_seen_id: Arc::new(Mutex::new(last_seen)),
     };
-    eframe::run_native(
-        "discord_to_insta",
-        options,
-        Box::new(|cc| {
-            egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(App::new()))
-        }),
-    )
+
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/api/config", get(api_config))
+        .route("/api/fetch", post(api_fetch))
+        .route("/api/preview", post(api_preview))
+        .route("/api/poller/toggle", post(api_poller_toggle))
+        .route("/api/poller/status", get(api_poller_status))
+        .route("/api/poller/log", get(api_poller_log))
+        .nest_service("/images", ServeDir::new(config.images_dir.clone()))
+        .with_state(ctx);
+
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(DEFAULT_PORT);
+    let addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
+    println!("discord_to_insta listening on http://{addr}");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("axum server");
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    eprintln!("received SIGINT, shutting down");
+}
+
+// ---------- handlers ----------------------------------------------------------
+
+async fn index() -> Html<&'static str> {
+    Html(INDEX_HTML)
+}
+
+#[derive(Serialize)]
+struct ConfigDto {
+    channel_id: String,
+    guild_id: String,
+}
+
+async fn api_config(State(ctx): State<AppCtx>) -> Json<ConfigDto> {
+    Json(ConfigDto {
+        channel_id: ctx.config.channel_id.clone(),
+        guild_id: ctx.config.guild_id.clone(),
+    })
+}
+
+async fn api_fetch(State(ctx): State<AppCtx>) -> Result<Html<String>, AppError> {
+    let messages = ctx
+        .client
+        .fetch_messages(&ctx.config.channel_id, DEFAULT_FETCH_LIMIT)
+        .await?;
+    Ok(Html(render_message_list(&messages)))
+}
+
+async fn api_preview(
+    State(ctx): State<AppCtx>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Html<String> {
+    let raw = form.get("raw").cloned().unwrap_or_default();
+    let user_map = collect_user_map(&form);
+    let caption = discord_to_caption(&raw, &user_map);
+    let distance_km = images::parse_distance_km(&raw);
+    let image_path = distance_km
+        .and_then(|km| images::image_for_distance(ctx.config.images_dir.as_path(), km));
+
+    // Two fragments via OOB swap: the caption textarea (main target) and the
+    // image panel (out-of-band).
+    let caption_html = format!(
+        r#"<textarea readonly rows="26">{}</textarea>"#,
+        html_escape(&caption)
+    );
+
+    let image_html = match (distance_km, &image_path) {
+        (Some(km), Some(p)) => {
+            let filename = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            format!(
+                r#"<div id="image-preview" class="image-preview" hx-swap-oob="true">
+                    <div><span class="badge ok">✓ {km} km</span></div>
+                    <p class="muted" style="font-size:11px;word-break:break-all">{file}</p>
+                    <img src="/images/{file}" alt="post template for {km} km">
+                </div>"#,
+                km = km,
+                file = html_escape(filename)
+            )
+        }
+        (Some(km), None) => format!(
+            r#"<div id="image-preview" class="image-preview" hx-swap-oob="true">
+                <div><span class="badge warn">⚠ {km} km — no matching image</span></div>
+                <p class="muted" style="font-size:11px">expected <code>*_{km}.png</code> in <code>{dir}/</code></p>
+            </div>"#,
+            km = km,
+            dir = html_escape(&ctx.config.images_dir.display().to_string())
+        ),
+        (None, _) => format!(
+            r#"<div id="image-preview" class="image-preview" hx-swap-oob="true">
+                <p class="muted">No distance detected in the message. Caption must contain <code>Distance : Nkm</code>.</p>
+            </div>"#,
+        ),
+    };
+
+    Html(format!("{caption_html}{image_html}"))
+}
+
+async fn api_poller_toggle(
+    State(ctx): State<AppCtx>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Html<String> {
+    let enable = matches!(form.get("enabled").map(|s| s.as_str()), Some("1" | "true" | "on"));
+    if enable {
+        start_poller(&ctx).await;
+    } else {
+        stop_poller(&ctx).await;
+    }
+    render_poller_status(&ctx).await
+}
+
+async fn api_poller_status(State(ctx): State<AppCtx>) -> Html<String> {
+    render_poller_status(&ctx).await
+}
+
+async fn api_poller_log(State(ctx): State<AppCtx>) -> Html<String> {
+    let log = ctx.poller_log.lock().await;
+    if log.is_empty() {
+        return Html(r#"<span class="muted">No events yet. Enable auto-react to start watching.</span>"#.to_string());
+    }
+    let mut buf = String::new();
+    for line in log.iter() {
+        let class = if line.contains("error") || line.contains("❌") {
+            "err"
+        } else if line.starts_with("reacted") || line.contains("bootstrap") {
+            "ok"
+        } else {
+            ""
+        };
+        buf.push_str(&format!(
+            r#"<div class="line {class}">{}</div>"#,
+            html_escape(line)
+        ));
+    }
+    Html(buf)
+}
+
+// ---------- rendering helpers -----------------------------------------------
+
+fn render_message_list(messages: &[Message]) -> String {
+    if messages.is_empty() {
+        return r#"<p class="muted">No messages in this channel.</p>"#.to_string();
+    }
+    let mut buf = String::new();
+    for msg in messages {
+        let mention_ids: Vec<&str> = msg.mentions.iter().map(|m| m.id.as_str()).collect();
+        let mentions_json = serde_json::to_string(&mention_ids).unwrap_or_else(|_| "[]".into());
+        let first_line = msg.content.lines().next().unwrap_or("").trim();
+        let preview: String = if first_line.chars().count() > 160 {
+            first_line.chars().take(160).collect::<String>() + "…"
+        } else {
+            first_line.to_string()
+        };
+        let date = msg.timestamp.split('T').next().unwrap_or(&msg.timestamp);
+        buf.push_str(&format!(
+            r#"<div class="msg" data-id="{id}" data-content="{content}" data-mentions='{mentions}'>
+                <div class="meta">{date} · {author}</div>
+                <div class="preview">{preview}</div>
+            </div>"#,
+            id = html_escape(&msg.id),
+            content = html_attr_escape(&msg.content),
+            mentions = html_attr_escape(&mentions_json),
+            date = html_escape(date),
+            author = html_escape(msg.author.display()),
+            preview = html_escape(&preview),
+        ));
+    }
+    buf
+}
+
+async fn render_poller_status(ctx: &AppCtx) -> Html<String> {
+    let running = ctx.poller.lock().await.is_some();
+    let last_seen = ctx.last_seen_id.lock().await.clone();
+    let last = last_seen.as_deref().unwrap_or("none");
+    let (class, label) = if running { ("ok", "running") } else { ("muted", "stopped") };
+    Html(format!(
+        r#"<span class="badge {class}">{label}</span> <span class="muted">last seen:</span> <code style="font-size:11px">{last}</code>"#,
+        last = html_escape(last)
+    ))
+}
+
+fn collect_user_map(form: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut ids: HashMap<String, String> = HashMap::new();
+    let mut handles: HashMap<String, String> = HashMap::new();
+    for (k, v) in form {
+        if let Some(n) = k.strip_prefix("handle_id_") {
+            if !v.trim().is_empty() {
+                ids.insert(n.to_string(), v.trim().to_string());
+            }
+        } else if let Some(n) = k.strip_prefix("handle_user_") {
+            if !v.trim().is_empty() {
+                handles.insert(n.to_string(), v.trim().trim_start_matches('@').to_string());
+            }
+        }
+    }
+    ids.into_iter()
+        .filter_map(|(n, id)| handles.get(&n).map(|h| (id, h.clone())))
+        .collect()
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn html_attr_escape(s: &str) -> String {
+    html_escape(s)
 }
 
 fn env_or(key: &str, fallback: &str) -> String {
@@ -49,659 +318,184 @@ fn env_or(key: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
-type FetchResult = Result<Vec<Message>, discord::Error>;
+// ---------- poller ----------------------------------------------------------
 
-enum PollerEvent {
-    Bootstrap { last_id: String },
-    Reacted { message_id: String, emoji: String },
-    NoNewMessages,
-    Error(String),
-    Stopped,
-}
-
-struct PollerHandle {
-    stop_flag: Arc<AtomicBool>,
-}
-
-impl PollerHandle {
-    fn request_stop(&self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
+async fn start_poller(ctx: &AppCtx) {
+    let mut guard = ctx.poller.lock().await;
+    if guard.is_some() {
+        return;
     }
-}
-
-struct App {
-    token: String,
-    channel_id: String,
-    guild_id: String,
-    images_dir: PathBuf,
-    raw: String,
-    user_map_rows: Vec<(String, String)>,
-    messages: Vec<Message>,
-    selected_message_id: Option<String>,
-    fetch_rx: Option<Receiver<FetchResult>>,
-    fetch_status: Status,
-    last_copy_status: Option<String>,
-    state_path: PathBuf,
-    poller: Option<PollerHandle>,
-    poller_rx: Option<Receiver<PollerEvent>>,
-    poller_log: VecDeque<String>,
-    last_seen_id: Option<String>,
-}
-
-#[derive(Default, Clone)]
-enum Status {
-    #[default]
-    Idle,
-    Fetching,
-    Error(String),
-    Ok(String),
-}
-
-impl App {
-    fn new() -> Self {
-        let token = std::env::var("DISCORD_BOT_TOKEN").unwrap_or_default();
-        let channel_id = env_or("DISCORD_CHANNEL_ID", DEFAULT_CHANNEL_ID);
-        let guild_id = env_or("DISCORD_GUILD_ID", DEFAULT_GUILD_ID);
-        let images_dir = PathBuf::from(env_or("DISCORD_TO_INSTA_IMAGES_DIR", DEFAULT_IMAGES_DIR));
-        let state_path = match std::env::var("DISCORD_TO_INSTA_STATE_PATH") {
-            Ok(s) if !s.is_empty() => PathBuf::from(s),
-            _ => state::default_path(),
-        };
-        let state = AppState::load(&state_path);
-        let last_seen_id = state.last_reacted_by_channel.get(&channel_id).cloned();
-        Self {
-            token,
-            channel_id,
-            guild_id,
-            images_dir,
-            raw: String::new(),
-            user_map_rows: vec![(String::new(), String::new())],
-            messages: Vec::new(),
-            selected_message_id: None,
-            fetch_rx: None,
-            fetch_status: Status::Idle,
-            last_copy_status: None,
-            state_path,
-            poller: None,
-            poller_rx: None,
-            poller_log: VecDeque::new(),
-            last_seen_id,
-        }
+    if ctx.config.token.is_empty() {
+        push_log(
+            &ctx.poller_log,
+            "cannot start auto-react: DISCORD_BOT_TOKEN is empty",
+        )
+        .await;
+        return;
     }
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    *guard = Some(PollerHandle {
+        stop_flag: stop_flag.clone(),
+    });
+    drop(guard);
 
-    fn user_map(&self) -> HashMap<String, String> {
-        self.user_map_rows
-            .iter()
-            .filter(|(id, handle)| !id.trim().is_empty() && !handle.trim().is_empty())
-            .map(|(id, handle)| {
-                (
-                    id.trim().to_string(),
-                    handle.trim().trim_start_matches('@').to_string(),
-                )
-            })
-            .collect()
-    }
-
-    fn start_fetch(&mut self) {
-        if matches!(self.fetch_status, Status::Fetching) {
-            return;
-        }
-        if self.token.trim().is_empty() {
-            self.fetch_status =
-                Status::Error("Missing bot token (set DISCORD_BOT_TOKEN or paste it above).".into());
-            return;
-        }
-        if self.channel_id.trim().is_empty() {
-            self.fetch_status = Status::Error("Missing channel ID.".into());
-            return;
-        }
-
-        let (tx, rx) = channel();
-        let token = self.token.trim().to_string();
-        let channel_id = self.channel_id.trim().to_string();
-        thread::spawn(move || {
-            let client = Client::new(token);
-            let result = client.fetch_messages(&channel_id, DEFAULT_FETCH_LIMIT);
-            let _ = tx.send(result);
-        });
-        self.fetch_rx = Some(rx);
-        self.fetch_status = Status::Fetching;
-    }
-
-    fn poll_fetch(&mut self, ctx: &egui::Context) {
-        let Some(rx) = &self.fetch_rx else { return };
-        match rx.try_recv() {
-            Ok(Ok(messages)) => {
-                let n = messages.len();
-                self.messages = messages;
-                self.fetch_status = Status::Ok(format!("fetched {n} messages"));
-                self.fetch_rx = None;
-            }
-            Ok(Err(e)) => {
-                self.fetch_status = Status::Error(e.to_string());
-                self.fetch_rx = None;
-            }
-            Err(TryRecvError::Empty) => {
-                ctx.request_repaint_after(Duration::from_millis(100));
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.fetch_status = Status::Error("Fetch thread disconnected.".into());
-                self.fetch_rx = None;
-            }
-        }
-    }
-
-    fn load_selected(&mut self, id: &str) {
-        if let Some(m) = self.messages.iter().find(|m| m.id == id) {
-            self.raw = m.content.clone();
-            self.selected_message_id = Some(id.to_string());
-            for user in &m.mentions {
-                let already_present = self.user_map_rows.iter().any(|(rid, _)| rid == &user.id);
-                if !already_present {
-                    self.user_map_rows.push((user.id.clone(), String::new()));
-                }
-            }
-        }
-    }
-
-    fn start_poller(&mut self) {
-        if self.poller.is_some() {
-            return;
-        }
-        if self.token.trim().is_empty() {
-            self.push_log("cannot start auto-react: missing bot token".into());
-            return;
-        }
-        if self.channel_id.trim().is_empty() {
-            self.push_log("cannot start auto-react: missing channel ID".into());
-            return;
-        }
-
-        let (tx, rx) = channel();
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let token = self.token.trim().to_string();
-        let channel_id = self.channel_id.trim().to_string();
-        let state_path = self.state_path.clone();
-        let stop_clone = stop_flag.clone();
-        thread::spawn(move || run_poller(token, channel_id, state_path, stop_clone, tx));
-        self.poller = Some(PollerHandle { stop_flag });
-        self.poller_rx = Some(rx);
-        self.push_log(format!(
-            "auto-react started (polling every {}s, emojis: {})",
+    push_log(
+        &ctx.poller_log,
+        &format!(
+            "auto-react started (every {}s; emojis {})",
             POLL_INTERVAL.as_secs(),
             REACTION_EMOJIS.join(" ")
-        ));
-    }
+        ),
+    )
+    .await;
 
-    fn stop_poller(&mut self) {
-        if let Some(handle) = self.poller.take() {
-            handle.request_stop();
-            self.push_log("auto-react stopping…".into());
-        }
-    }
+    let ctx = ctx.clone();
+    tokio::spawn(async move { run_poller(ctx, stop_flag).await });
+}
 
-    fn poll_poller_events(&mut self, ctx: &egui::Context) {
-        // Drain first, handle after, so we don't hold a borrow of self while
-        // calling &mut self methods.
-        let mut drained: Vec<PollerEvent> = Vec::new();
-        let mut disconnected = false;
-        if let Some(rx) = &self.poller_rx {
-            loop {
-                match rx.try_recv() {
-                    Ok(ev) => drained.push(ev),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-        }
-        for ev in drained {
-            self.handle_poller_event(ev);
-        }
-        if disconnected {
-            self.poller_rx = None;
-            self.poller = None;
-            self.push_log("auto-react thread ended".into());
-        } else if self.poller.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(500));
-        }
-    }
-
-    fn handle_poller_event(&mut self, ev: PollerEvent) {
-        match ev {
-            PollerEvent::Bootstrap { last_id } => {
-                self.last_seen_id = Some(last_id.clone());
-                self.push_log(format!(
-                    "bootstrap: recorded newest message {last_id} (no retroactive reactions)"
-                ));
-            }
-            PollerEvent::Reacted { message_id, emoji } => {
-                self.last_seen_id = Some(message_id.clone());
-                self.push_log(format!("reacted {emoji} on {message_id}"));
-            }
-            PollerEvent::NoNewMessages => {
-                // Chatty; skip.
-            }
-            PollerEvent::Error(e) => {
-                self.push_log(format!("error: {e}"));
-            }
-            PollerEvent::Stopped => {
-                self.poller = None;
-                self.poller_rx = None;
-                self.push_log("auto-react stopped".into());
-            }
-        }
-    }
-
-    fn push_log(&mut self, line: String) {
-        if self.poller_log.len() >= LOG_MAX_LINES {
-            self.poller_log.pop_front();
-        }
-        self.poller_log.push_back(line);
+async fn stop_poller(ctx: &AppCtx) {
+    let mut guard = ctx.poller.lock().await;
+    if let Some(handle) = guard.take() {
+        handle.stop_flag.store(true, Ordering::Relaxed);
+        drop(guard);
+        push_log(&ctx.poller_log, "auto-react stopping…").await;
     }
 }
 
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_fetch(ctx);
-        self.poll_poller_events(ctx);
-
-        egui::TopBottomPanel::top("config").show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("Bot token:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.token)
-                        .password(true)
-                        .hint_text("Bot token (or set DISCORD_BOT_TOKEN)")
-                        .desired_width(260.0),
-                );
-                ui.label("Channel ID:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.channel_id)
-                        .hint_text("Discord channel ID")
-                        .desired_width(180.0),
-                );
-                ui.label("Guild ID:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.guild_id)
-                        .hint_text("Discord guild/server ID")
-                        .desired_width(180.0),
-                );
-                let fetching = matches!(self.fetch_status, Status::Fetching);
-                let btn = ui.add_enabled(
-                    !fetching,
-                    egui::Button::new(if fetching { "Fetching…" } else { "Fetch recent" }),
-                );
-                if btn.clicked() {
-                    self.start_fetch();
-                }
-                match &self.fetch_status {
-                    Status::Idle => {}
-                    Status::Fetching => {
-                        ui.spinner();
-                    }
-                    Status::Ok(msg) => {
-                        ui.colored_label(egui::Color32::from_rgb(80, 180, 100), msg);
-                    }
-                    Status::Error(msg) => {
-                        ui.colored_label(egui::Color32::from_rgb(220, 100, 100), msg);
-                    }
-                }
-            });
-
-            ui.horizontal(|ui| {
-                let running = self.poller.is_some();
-                let mut enabled = running;
-                if ui
-                    .checkbox(&mut enabled, "Auto-react to new announcements")
-                    .changed()
-                {
-                    if enabled {
-                        self.start_poller();
-                    } else {
-                        self.stop_poller();
-                    }
-                }
-                ui.label(format!("emojis: {}", REACTION_EMOJIS.join(" ")));
-                ui.separator();
-                match &self.last_seen_id {
-                    Some(id) => ui.label(format!("last seen: {id}")),
-                    None => ui.label("last seen: (none — first run)"),
-                };
-                if running {
-                    ui.spinner();
-                }
-            });
-            ui.add_space(4.0);
-        });
-
-        egui::TopBottomPanel::bottom("log")
-            .resizable(true)
-            .default_height(110.0)
-            .show(ctx, |ui| {
-                ui.label(egui::RichText::new("Auto-react log").strong());
-                egui::ScrollArea::vertical()
-                    .id_salt("log_scroll")
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        if self.poller_log.is_empty() {
-                            ui.label("(no events yet)");
-                        } else {
-                            for line in &self.poller_log {
-                                ui.label(line);
-                            }
-                        }
-                    });
-            });
-
-        egui::SidePanel::left("messages")
-            .default_width(320.0)
-            .show(ctx, |ui| {
-                ui.heading("Recent messages");
-                ui.separator();
-                if self.messages.is_empty() {
-                    ui.label("No messages fetched yet.");
-                } else {
-                    let selected = self.selected_message_id.clone();
-                    let mut to_load: Option<String> = None;
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for msg in &self.messages {
-                            let is_selected = selected.as_deref() == Some(&msg.id);
-                            let preview = message_preview(&msg.content);
-                            let label = format!(
-                                "{}  {}\n{}",
-                                short_timestamp(&msg.timestamp),
-                                msg.author.display(),
-                                preview
-                            );
-                            if ui.selectable_label(is_selected, label).clicked() {
-                                to_load = Some(msg.id.clone());
-                            }
-                            ui.separator();
-                        }
-                    });
-                    if let Some(id) = to_load {
-                        self.load_selected(&id);
-                    }
-                }
-            });
-
-        egui::SidePanel::right("handles")
-            .default_width(320.0)
-            .show(ctx, |ui| {
-                ui.heading("Discord ID → Instagram handle");
-                ui.label("Mentions not in this table are removed.");
-                ui.separator();
-
-                let mut remove_idx: Option<usize> = None;
-                for (i, (id, handle)) in self.user_map_rows.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(id)
-                                .hint_text("123456789")
-                                .desired_width(150.0),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(handle)
-                                .hint_text("@handle")
-                                .desired_width(120.0),
-                        );
-                        if ui.small_button("✕").clicked() {
-                            remove_idx = Some(i);
-                        }
-                    });
-                }
-                if let Some(i) = remove_idx {
-                    self.user_map_rows.remove(i);
-                }
-                if ui.button("+ add row").clicked() {
-                    self.user_map_rows.push((String::new(), String::new()));
-                }
-            });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let caption = discord_to_caption(&self.raw, &self.user_map());
-            let distance_km = images::parse_distance_km(&self.raw);
-            let image_path = distance_km
-                .and_then(|km| images::image_for_distance(self.images_dir.as_path(), km));
-
-            ui.heading("discord_to_insta");
-            ui.horizontal(|ui| {
-                ui.label("Image:");
-                match (distance_km, &image_path) {
-                    (Some(km), Some(p)) => {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(80, 180, 100),
-                            format!("✓ {} km → {}", km, display_path(p)),
-                        );
-                    }
-                    (Some(km), None) => {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(220, 160, 60),
-                            format!(
-                                "⚠ {} km detected but no image found in {}/ (expected *_{}.png)",
-                                km,
-                                self.images_dir.display(),
-                                km
-                            ),
-                        );
-                    }
-                    (None, _) => {
-                        ui.label("(no distance detected — caption must contain 'Distance : Nkm')");
-                    }
-                }
-            });
-            ui.separator();
-
-            let available = ui.available_size();
-            let preview_width = 260.0;
-            let col_width = (available.x - preview_width - 24.0) / 2.0;
-            let col_height = available.y - 40.0;
-
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label("Discord source");
-                    egui::ScrollArea::vertical()
-                        .id_salt("src")
-                        .max_height(col_height)
-                        .show(ui, |ui| {
-                            ui.add_sized(
-                                [col_width, col_height],
-                                egui::TextEdit::multiline(&mut self.raw)
-                                    .hint_text("Pick a message on the left, or paste one here…"),
-                            );
-                        });
-                });
-
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Instagram caption");
-                        if ui.button("Copy").clicked() {
-                            ctx.copy_text(caption.clone());
-                            self.last_copy_status =
-                                Some(format!("copied {} chars", caption.chars().count()));
-                        }
-                        if let (Some(msg_id), false, false) = (
-                            &self.selected_message_id,
-                            self.guild_id.trim().is_empty(),
-                            self.channel_id.trim().is_empty(),
-                        ) {
-                            let url = format!(
-                                "https://discord.com/channels/{}/{}/{}",
-                                self.guild_id.trim(),
-                                self.channel_id.trim(),
-                                msg_id
-                            );
-                            ui.hyperlink_to("↗ open in Discord", url);
-                        }
-                        if let Some(status) = &self.last_copy_status {
-                            ui.small(status);
-                        }
-                    });
-                    egui::ScrollArea::vertical()
-                        .id_salt("out")
-                        .max_height(col_height)
-                        .show(ui, |ui| {
-                            let mut view = caption.clone();
-                            ui.add_sized(
-                                [col_width, col_height],
-                                egui::TextEdit::multiline(&mut view).interactive(false),
-                            );
-                        });
-                });
-
-                ui.vertical(|ui| {
-                    ui.label("Post image preview");
-                    match &image_path {
-                        Some(p) => {
-                            let uri = format!("file://{}", p.display());
-                            ui.add(
-                                egui::Image::from_uri(uri)
-                                    .max_width(preview_width)
-                                    .maintain_aspect_ratio(true)
-                                    .fit_to_original_size(1.0),
-                            );
-                        }
-                        None => {
-                            ui.allocate_space(egui::vec2(preview_width, col_height));
-                        }
-                    }
-                });
-            });
-        });
-    }
-}
-
-/// Background poller: every POLL_INTERVAL, fetch recent messages, compare
-/// against the persisted last-reacted-ID for this channel, and react to any
-/// newer ones with all REACTION_EMOJIS. Bootstraps silently on first run.
-fn run_poller(
-    token: String,
-    channel_id: String,
-    state_path: PathBuf,
-    stop_flag: Arc<AtomicBool>,
-    tx: Sender<PollerEvent>,
-) {
-    let client = Client::new(token);
-
+async fn run_poller(ctx: AppCtx, stop_flag: Arc<AtomicBool>) {
     loop {
         if stop_flag.load(Ordering::Relaxed) {
-            let _ = tx.send(PollerEvent::Stopped);
+            push_log(&ctx.poller_log, "auto-react stopped").await;
+            *ctx.poller.lock().await = None;
             return;
         }
 
-        let mut state = AppState::load(&state_path);
-        let last_seen = state.last_reacted_by_channel.get(&channel_id).cloned();
-
-        match client.fetch_messages(&channel_id, DEFAULT_FETCH_LIMIT) {
+        match ctx
+            .client
+            .fetch_messages(&ctx.config.channel_id, DEFAULT_FETCH_LIMIT)
+            .await
+        {
             Ok(messages) => {
-                if messages.is_empty() {
-                    // Nothing to do.
-                } else if last_seen.is_none() {
-                    // Bootstrap: record the newest ID, don't react retroactively.
-                    let newest = &messages[0].id;
-                    state
-                        .last_reacted_by_channel
-                        .insert(channel_id.clone(), newest.clone());
-                    if let Err(e) = state.save(&state_path) {
-                        let _ = tx.send(PollerEvent::Error(format!(
-                            "failed to write state {}: {e}",
-                            state_path.display()
-                        )));
-                    } else {
-                        let _ = tx.send(PollerEvent::Bootstrap {
-                            last_id: newest.clone(),
-                        });
-                    }
-                } else {
-                    let last = last_seen.unwrap();
-                    // Messages come newest-first; process oldest-first so
-                    // last_seen advances monotonically and a mid-batch crash
-                    // resumes cleanly.
-                    let mut new_msgs: Vec<Message> = messages
-                        .into_iter()
-                        .filter(|m| state::is_newer_snowflake(&m.id, &last))
-                        .collect();
-                    new_msgs.reverse();
-
-                    if new_msgs.is_empty() {
-                        let _ = tx.send(PollerEvent::NoNewMessages);
-                    }
-
-                    for msg in new_msgs {
-                        if stop_flag.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let mut all_ok = true;
-                        for emoji in REACTION_EMOJIS {
-                            if let Err(e) = client.add_reaction(&channel_id, &msg.id, emoji) {
-                                let _ = tx.send(PollerEvent::Error(format!(
-                                    "{emoji} on {}: {e}",
-                                    msg.id
-                                )));
-                                all_ok = false;
-                                break;
-                            }
-                            let _ = tx.send(PollerEvent::Reacted {
-                                message_id: msg.id.clone(),
-                                emoji: (*emoji).to_string(),
-                            });
-                        }
-                        if all_ok {
-                            state
-                                .last_reacted_by_channel
-                                .insert(channel_id.clone(), msg.id.clone());
-                            if let Err(e) = state.save(&state_path) {
-                                let _ = tx.send(PollerEvent::Error(format!(
-                                    "failed to write state: {e}"
-                                )));
-                            }
-                        } else {
-                            // Stop the batch — next cycle will retry from the
-                            // same last_seen, which is correct.
-                            break;
-                        }
-                    }
+                if let Err(e) = handle_batch(&ctx, messages).await {
+                    push_log(&ctx.poller_log, &format!("error: {e}")).await;
                 }
             }
             Err(e) => {
-                let _ = tx.send(PollerEvent::Error(e.to_string()));
+                push_log(&ctx.poller_log, &format!("error: {e}")).await;
             }
         }
 
-        // Interruptible sleep so stop requests are seen within ~100 ms.
+        // Interruptible sleep.
         let mut slept = Duration::ZERO;
         while slept < POLL_INTERVAL {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            thread::sleep(Duration::from_millis(100));
-            slept += Duration::from_millis(100);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            slept += Duration::from_millis(200);
         }
     }
 }
 
-fn display_path(p: &PathBuf) -> String {
-    p.file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| p.display().to_string())
+async fn handle_batch(ctx: &AppCtx, messages: Vec<Message>) -> std::io::Result<()> {
+    let mut persisted = AppState::load(&ctx.config.state_path);
+    let last_seen = persisted
+        .last_reacted_by_channel
+        .get(&ctx.config.channel_id)
+        .cloned();
+
+    if messages.is_empty() {
+        return Ok(());
+    }
+
+    if last_seen.is_none() {
+        let newest = messages[0].id.clone();
+        persisted
+            .last_reacted_by_channel
+            .insert(ctx.config.channel_id.clone(), newest.clone());
+        persisted.save(&ctx.config.state_path)?;
+        *ctx.last_seen_id.lock().await = Some(newest.clone());
+        push_log(
+            &ctx.poller_log,
+            &format!("bootstrap: recorded newest {newest} (no retroactive reactions)"),
+        )
+        .await;
+        return Ok(());
+    }
+
+    let last = last_seen.unwrap();
+    let mut new_msgs: Vec<Message> = messages
+        .into_iter()
+        .filter(|m| state::is_newer_snowflake(&m.id, &last))
+        .collect();
+    new_msgs.reverse(); // process oldest-first
+
+    for msg in new_msgs {
+        let mut all_ok = true;
+        for emoji in REACTION_EMOJIS {
+            match ctx
+                .client
+                .add_reaction(&ctx.config.channel_id, &msg.id, emoji)
+                .await
+            {
+                Ok(()) => {
+                    push_log(
+                        &ctx.poller_log,
+                        &format!("reacted {emoji} on {}", msg.id),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    push_log(
+                        &ctx.poller_log,
+                        &format!("error reacting {emoji} on {}: {e}", msg.id),
+                    )
+                    .await;
+                    all_ok = false;
+                    break;
+                }
+            }
+        }
+        if all_ok {
+            persisted
+                .last_reacted_by_channel
+                .insert(ctx.config.channel_id.clone(), msg.id.clone());
+            persisted.save(&ctx.config.state_path)?;
+            *ctx.last_seen_id.lock().await = Some(msg.id.clone());
+        } else {
+            break;
+        }
+    }
+    Ok(())
 }
 
-fn message_preview(content: &str) -> String {
-    const MAX: usize = 120;
-    let first_line = content.lines().next().unwrap_or("").trim();
-    if first_line.chars().count() <= MAX {
-        first_line.to_string()
-    } else {
-        let truncated: String = first_line.chars().take(MAX).collect();
-        format!("{truncated}…")
+async fn push_log(log: &Mutex<VecDeque<String>>, line: &str) {
+    let mut l = log.lock().await;
+    if l.len() >= LOG_MAX_LINES {
+        l.pop_front();
+    }
+    l.push_back(line.to_string());
+}
+
+// ---------- error type ------------------------------------------------------
+
+struct AppError(String);
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!(
+                r#"<div class="badge err">error</div> <span>{}</span>"#,
+                html_escape(&self.0)
+            )),
+        )
+            .into_response()
     }
 }
 
-fn short_timestamp(ts: &str) -> &str {
-    ts.split('T').next().unwrap_or(ts)
+impl From<discord::Error> for AppError {
+    fn from(value: discord::Error) -> Self {
+        Self(value.to_string())
+    }
 }

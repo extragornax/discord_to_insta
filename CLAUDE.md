@@ -34,8 +34,26 @@ The user → handle map is the only piece of durable configuration the compose s
 
 ## Stack
 
-- **Language:** Rust, edition 2024 (see `Cargo.toml`). `[dependencies]` is currently empty — any crate is a deliberate choice, so justify additions in commit messages.
-- **UI:** not yet chosen. Before picking one, confirm the target (desktop GUI vs. local web UI) with the user; the right crate (`egui`/`iced`/`tauri`/`axum`+browser) depends on that answer.
+- **Language:** Rust, edition 2024. Keep the dep list lean; every addition should be justifiable in the commit message.
+- **Runtime:** `tokio` (multi-thread).
+- **HTTP server:** `axum` 0.7 + `tower-http` (for serving `images/` via `ServeDir`).
+- **Discord REST client:** `reqwest` 0.12 with `rustls-tls`. No gateway/WebSocket — pure REST polling.
+- **Frontend:** single `src/index.html` served via `include_str!`, htmx 2 loaded from CDN, no JS build step, no framework. Handlers return HTML fragments (not JSON) that htmx swaps into the page.
+- **No desktop GUI anymore.** Earlier commits used `eframe`/`egui`; those were removed when the UI moved to the browser.
+
+## Web UI
+
+- One binary, one process: the axum server and the auto-react poller share the tokio runtime. The poller is a `tokio::spawn`'d task, not a separate binary.
+- **No authentication.** Anyone who can reach the port can trigger fetches and start/stop the poller. Bind to localhost or a trusted docker network; don't expose publicly without a reverse proxy that enforces auth.
+- Bot token is **only** read from env — there is no UI field to set or view it. This is deliberate: the web UI never handles the secret.
+- Port: `PORT` env var (default 8080).
+- Endpoints:
+  - `GET /` — the single-page app (htmx-driven).
+  - `GET /api/config` — JSON with the configured `channel_id` + `guild_id` (never token).
+  - `POST /api/fetch` — HTML fragment: the recent messages list.
+  - `POST /api/preview` — HTML fragments (caption textarea + OOB image preview) from a form post containing `raw` + `handle_id_N`/`handle_user_N` pairs.
+  - `POST /api/poller/toggle` (`enabled=1|0`), `GET /api/poller/status`, `GET /api/poller/log` — auto-react control + polling.
+  - `GET /images/*` — static file serving from the configured images dir.
 
 ## Commands
 
@@ -78,12 +96,13 @@ The project will need Discord bot credentials and Instagram Graph API credential
 
 ### Discord
 
-- Env vars (all read in `App::new()`; the UI fields are pre-populated from these):
-  - `DISCORD_BOT_TOKEN` — bot auth. UI has a masked fallback field. Never persisted.
+- Env vars (all read in `main()` before the server starts):
+  - `DISCORD_BOT_TOKEN` — bot auth. **Env-only.** The web UI never exposes it.
   - `DISCORD_CHANNEL_ID` — the target announcement channel. Falls back to `DEFAULT_CHANNEL_ID`.
-  - `DISCORD_GUILD_ID` — the guild (server) the channel lives in. Used only to build the "open in Discord" hyperlink.
+  - `DISCORD_GUILD_ID` — the guild the channel lives in. Surfaced in the topbar chip and used to build the "open in Discord" hyperlink for a selected message.
   - `DISCORD_TO_INSTA_IMAGES_DIR` (optional) — overrides the default `images/` path. Useful when running in a container with a volume mount.
   - `DISCORD_TO_INSTA_STATE_PATH` (optional) — overrides the default XDG state-file path.
+  - `PORT` (optional) — HTTP listen port, default 8080.
 - `.env` loading: `dotenvy::dotenv()` runs once at `main()` start. Missing `.env` is not an error (vars may come from docker-compose `env_file:` or the ambient environment). Ambient env wins over `.env`.
 - Template lives at `.env.example`; `.env` is gitignored.
 - Target channel defaults to `981806074233507880` (Mayo Jaune announcements, guild `981525647891525642`). It's only a UI default — the field is editable. Update `DEFAULT_CHANNEL_ID` in `src/main.rs` if the canonical channel ever changes.
@@ -92,9 +111,9 @@ The project will need Discord bot credentials and Instagram Graph API credential
 
 ### Auto-react poller
 
-- Lives in `run_poller` (`src/main.rs`). Polls the channel every `POLL_INTERVAL` (30 s) via the same REST client used for fetches, so no tokio runtime. Interruptible: the sleep loop checks the stop flag every 100 ms.
+- Lives in `run_poller` (`src/main.rs`) as a `tokio::spawn`'d task. Polls the channel every `POLL_INTERVAL` (30 s) via the same reqwest client used for web-triggered fetches. Interruptible: the `AtomicBool` stop flag is checked every 200 ms during sleep.
 - On first run for a channel it **bootstraps** — it records the current newest message ID into `state.json` without reacting. Historical messages are never reacted to retroactively.
 - "New" is determined by numeric comparison of Discord snowflake IDs (`state::is_newer_snowflake`). String comparison would misorder IDs of different lengths.
 - The three emojis are hardcoded in `REACTION_EMOJIS` (`✅ 🚫 🤔`) to match the announcement template's reaction legend. If the template's emojis change, update this const.
 - Persistent state: `$XDG_CONFIG_HOME/discord_to_insta/state.json` (falls back to `~/.config/…`). Schema: `{ last_reacted_by_channel: { channel_id: message_id } }`. Small by design; if it grows, split it.
-- The poller **does not auto-start** on launch — the user must opt in each session via the UI checkbox. This avoids accidentally reacting to a backlog after config changes.
+- The poller **does not auto-start** on launch — the user must opt in via the `auto-react` checkbox in the topbar. This avoids accidentally reacting to a backlog after config changes. Because the web UI has no auth, be deliberate about who can reach the port.

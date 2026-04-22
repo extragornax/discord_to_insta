@@ -81,51 +81,55 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub struct Client {
+    http: reqwest::Client,
     token: String,
-    agent: ureq::Agent,
 }
 
 impl Client {
     pub fn new(token: impl Into<String>) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
+        let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
-            .build();
-        Self { token: token.into(), agent }
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("reqwest client builder succeeds with defaults");
+        Self { http, token: token.into() }
     }
 
     /// Fetch the most recent `limit` messages from a channel (newest first).
     /// Discord caps `limit` at 100.
-    pub fn fetch_messages(&self, channel_id: &str, limit: u32) -> Result<Vec<Message>, Error> {
+    pub async fn fetch_messages(
+        &self,
+        channel_id: &str,
+        limit: u32,
+    ) -> Result<Vec<Message>, Error> {
         let limit = limit.clamp(1, 100);
         let url = format!("{API_BASE}/channels/{channel_id}/messages?limit={limit}");
 
-        let response = self
-            .agent
+        let resp = self
+            .http
             .get(&url)
-            .set("Authorization", &format!("Bot {}", self.token))
-            .call();
+            .header("Authorization", format!("Bot {}", self.token))
+            .send()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
 
-        match response {
-            Ok(resp) => {
-                let body = resp
-                    .into_string()
-                    .map_err(|e| Error::Transport(e.to_string()))?;
-                serde_json::from_str::<Vec<Message>>(&body)
-                    .map_err(|e| Error::Parse(format!("{e} — body was: {body}")))
-            }
-            Err(ureq::Error::Status(status, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                Err(map_status(status, body))
-            }
-            Err(ureq::Error::Transport(t)) => Err(Error::Transport(t.to_string())),
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        if !(200..300).contains(&status) {
+            return Err(map_status(status, body));
         }
+
+        serde_json::from_str::<Vec<Message>>(&body)
+            .map_err(|e| Error::Parse(format!("{e} — body was: {body}")))
     }
 
     /// React to a message as the bot. `emoji` must be a Unicode emoji string
     /// (e.g. "✅"). Custom emojis would need `name:id` form, not supported here.
-    pub fn add_reaction(
+    pub async fn add_reaction(
         &self,
         channel_id: &str,
         message_id: &str,
@@ -136,21 +140,21 @@ impl Client {
             "{API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me"
         );
 
-        let response = self
-            .agent
+        let resp = self
+            .http
             .put(&url)
-            .set("Authorization", &format!("Bot {}", self.token))
-            .set("Content-Length", "0")
-            .call();
+            .header("Authorization", format!("Bot {}", self.token))
+            .header("Content-Length", "0")
+            .send()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
 
-        match response {
-            Ok(_) => Ok(()),
-            Err(ureq::Error::Status(status, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                Err(map_status(status, body))
-            }
-            Err(ureq::Error::Transport(t)) => Err(Error::Transport(t.to_string())),
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(());
         }
+        let body = resp.text().await.unwrap_or_default();
+        Err(map_status(status, body))
     }
 }
 
@@ -194,7 +198,6 @@ pub(crate) fn percent_encode(s: &str) -> String {
 mod tests {
     use super::*;
 
-    // Canned sample in Discord's v10 JSON shape for the fields we consume.
     const SAMPLE: &str = r#"[
       {
         "id": "111",
@@ -232,11 +235,8 @@ mod tests {
 
     #[test]
     fn percent_encode_emojis() {
-        // ✅ U+2705 — UTF-8 E2 9C 85
         assert_eq!(percent_encode("✅"), "%E2%9C%85");
-        // 🚫 U+1F6AB — UTF-8 F0 9F 9A AB
         assert_eq!(percent_encode("🚫"), "%F0%9F%9A%AB");
-        // 🤔 U+1F914 — UTF-8 F0 9F A4 94
         assert_eq!(percent_encode("🤔"), "%F0%9F%A4%94");
     }
 
