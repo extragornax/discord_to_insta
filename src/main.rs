@@ -1,4 +1,5 @@
 mod discord;
+mod gateway;
 mod images;
 mod state;
 mod transform;
@@ -52,6 +53,7 @@ struct AppCtx {
     poller_log: Arc<Mutex<VecDeque<String>>>,
     poller: Arc<Mutex<Option<PollerHandle>>>,
     last_seen_id: Arc<Mutex<Option<String>>>,
+    gateway_connected: Arc<AtomicBool>,
 }
 
 #[tokio::main]
@@ -86,7 +88,20 @@ async fn main() {
         poller_log: Arc::new(Mutex::new(VecDeque::new())),
         poller: Arc::new(Mutex::new(None)),
         last_seen_id: Arc::new(Mutex::new(last_seen)),
+        gateway_connected: Arc::new(AtomicBool::new(false)),
     };
+
+    // Gateway task: holds a WebSocket to Discord so the bot shows as online.
+    // Survives the whole process lifetime — there's no UI toggle for it.
+    if !config.token.is_empty() {
+        let gw_ctx = gateway::GatewayCtx {
+            token: config.token.clone(),
+            stop_flag: Arc::new(AtomicBool::new(false)), // lives for the process
+            log: ctx.poller_log.clone(),
+            connected: ctx.gateway_connected.clone(),
+        };
+        tokio::spawn(gateway::run(gw_ctx));
+    }
 
     // Auto-start the poller so the bot keeps reacting even when no operator
     // is watching. Skipped silently if the token is empty — starting would
@@ -104,6 +119,7 @@ async fn main() {
         .route("/api/poller/status", get(api_poller_status))
         .route("/api/poller/running", get(api_poller_running))
         .route("/api/poller/log", get(api_poller_log))
+        .route("/api/gateway/status", get(api_gateway_status))
         .nest_service("/images", ServeDir::new(config.images_dir.clone()))
         .with_state(ctx);
 
@@ -228,6 +244,14 @@ async fn api_poller_running(State(ctx): State<AppCtx>) -> &'static str {
         "1"
     } else {
         "0"
+    }
+}
+
+async fn api_gateway_status(State(ctx): State<AppCtx>) -> Html<&'static str> {
+    if ctx.gateway_connected.load(Ordering::Relaxed) {
+        Html(r#"<span class="badge ok">online</span>"#)
+    } else {
+        Html(r#"<span class="badge muted">offline</span>"#)
     }
 }
 

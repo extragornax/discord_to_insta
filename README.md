@@ -12,6 +12,7 @@ Built for the Mayo Jaune cycling group's weekly ride posts, but the transformati
 - **Auto-react bot.** Opt-in poller that reacts to new announcements with ✅ 🚫 🤔 every 30 s. Bootstraps silently on first run (no retroactive reactions); persists the last-reacted message ID so restarts resume cleanly.
 - **2,200-char counter.** Instagram's caption cap is enforced visibly — the counter turns red if you go over.
 - **No JS build step.** Frontend is one static HTML file + htmx from CDN.
+- **Bot shows online.** A minimal Gateway WebSocket runs alongside the REST client so the bot has the green-dot presence Discord users expect.
 
 ## Stack
 

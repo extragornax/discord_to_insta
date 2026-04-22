@@ -52,6 +52,8 @@
 <body>
   <div class="topbar">
     <b>discord_to_insta</b>
+    <span class="muted">bot:</span><span id="gateway-status"
+      hx-get="/api/gateway/status" hx-trigger="load, every 5s">…</span>
     <span class="muted">channel:</span><span class="chip" id="channel-id-chip">…</span>
     <span class="muted">guild:</span><span class="chip" id="guild-id-chip">…</span>
     <button hx-post="/api/fetch"
