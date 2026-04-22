@@ -1,182 +1,824 @@
 <!doctype html>
-<html lang="en">
+<html lang="fr">
 <head>
   <meta charset="utf-8">
-  <title>discord_to_insta</title>
+  <title>discord_to_insta — L’Équipe du Soir</title>
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..900;1,6..96,400..900&family=Archivo:ital,wght@0,300..900;1,300..900&family=Archivo+Narrow:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
   <style>
-    :root { --bg: #1a1a1c; --fg: #e8e8ea; --muted: #8a8a92; --accent: #7aa2f7; --ok: #4ade80; --warn: #fbbf24; --err: #f87171; --panel: #23232a; --border: #30303a; }
+    :root {
+      --paper:       #f2ede3;
+      --paper-dim:   #e9dfca;
+      --paper-warm:  #ede3cf;
+      --ink:         #141210;
+      --ink-2:       #2b2620;
+      --ink-soft:    #4a4238;
+      --gray:        #897e6a;
+      --rule:        #cfc4ab;
+      --rule-strong: #7c6f55;
+      --jaune:       #f4c430;
+      --jaune-dark:  #b88a0e;
+      --jaune-wash:  rgba(244, 196, 48, 0.12);
+      --red:         #8c1c1c;
+      --green:       #3e5d1f;
+
+      --display:     'Bodoni Moda', 'Didot', 'Bodoni 72', serif;
+      --sans:        'Archivo', 'Helvetica Neue', sans-serif;
+      --narrow:      'Archivo Narrow', 'Helvetica Neue', sans-serif;
+      --mono:        'JetBrains Mono', 'SF Mono', monospace;
+    }
+
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
-    .topbar { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-    .topbar b { font-size: 15px; }
-    .topbar .muted { color: var(--muted); }
-    .topbar .chip { padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
-    .layout { display: grid; grid-template-columns: 300px 1fr 260px 300px; gap: 1px; background: var(--border); min-height: calc(100vh - 52px - 140px); }
-    .panel { background: var(--bg); padding: 12px; overflow: auto; }
-    .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
-    button { background: var(--panel); color: var(--fg); border: 1px solid var(--border); padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; }
-    button:hover { border-color: var(--accent); }
-    button.primary { background: var(--accent); color: #0c0c0e; border-color: var(--accent); }
-    input, textarea { background: var(--panel); color: var(--fg); border: 1px solid var(--border); padding: 6px 8px; border-radius: 4px; font-size: 13px; font-family: inherit; width: 100%; }
-    textarea { font-family: ui-monospace, Menlo, monospace; font-size: 12px; resize: none; }
-    .msg-list .msg { padding: 8px; border-radius: 4px; cursor: pointer; margin-bottom: 4px; }
-    .msg-list .msg:hover { background: var(--panel); }
-    .msg-list .msg.selected { background: var(--panel); border-left: 2px solid var(--accent); }
-    .msg-list .msg .meta { font-size: 11px; color: var(--muted); }
-    .msg-list .msg .preview { font-size: 12px; margin-top: 2px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    .badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
-    .badge.ok { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
-    .badge.warn { background: rgba(251, 191, 36, 0.15); color: var(--warn); }
-    .badge.err { background: rgba(248, 113, 113, 0.15); color: var(--err); }
-    .badge.muted { background: var(--panel); color: var(--muted); }
-    .handle-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 4px; margin-bottom: 4px; }
-    .handle-row button { padding: 4px 8px; }
-    .log { background: var(--panel); border-top: 1px solid var(--border); padding: 8px 16px; height: 140px; overflow: auto; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
-    .log .line { padding: 1px 0; }
-    .log .line.err { color: var(--err); }
-    .log .line.ok { color: var(--ok); }
-    .hx-indicator { display: none; }
-    .htmx-request .hx-indicator { display: inline; }
-    .htmx-request.hx-indicator { display: inline; }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .image-preview img { max-width: 100%; border-radius: 4px; border: 1px solid var(--border); }
-    label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 2px; }
-    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-    .char-counter { font-size: 11px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
-    .char-counter.over { color: var(--err); }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+      font-feature-settings: "liga" 1, "kern" 1, "ss01" 1;
+    }
+
+    /* Paper grain overlay. Subtle — 4% opacity SVG noise. */
+    body::before {
+      content: "";
+      position: fixed; inset: 0;
+      pointer-events: none;
+      z-index: 100;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.8' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.08 0 0 0 0 0.07 0 0 0 0 0.06 0 0 0 0.45 0'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.6'/></svg>");
+      opacity: 0.38;
+      mix-blend-mode: multiply;
+    }
+
+    /* ──────────────────────────────────────────────────────────────── masthead */
+    .masthead {
+      position: relative;
+      padding: 28px 42px 18px;
+      border-bottom: 3px solid var(--ink);
+      background: var(--paper);
+      animation: paperIn 520ms ease-out both;
+    }
+    .masthead::after {
+      content: "";
+      position: absolute; left: 42px; right: 42px; bottom: -8px; height: 1px;
+      background: var(--ink);
+    }
+
+    .mast-rule {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--ink);
+      font-family: var(--narrow);
+      font-size: 11px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+    .mast-rule b { font-weight: 600; color: var(--ink); }
+    .mast-rule .edition-no { font-family: var(--display); font-style: italic; font-size: 14px; color: var(--ink); }
+    .mast-rule .sep { color: var(--gray); }
+
+    .mast-title {
+      margin: 16px 0 8px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: end;
+    }
+    .mast-title h1 {
+      margin: 0;
+      font-family: var(--display);
+      font-weight: 900;
+      font-variation-settings: "opsz" 96;
+      font-style: italic;
+      letter-spacing: -0.02em;
+      font-size: clamp(54px, 7.4vw, 104px);
+      line-height: 0.88;
+      color: var(--ink);
+    }
+    .mast-title h1 .amp {
+      font-style: italic;
+      font-weight: 400;
+      color: var(--jaune-dark);
+      padding: 0 2px;
+    }
+    .mast-subtitle {
+      font-family: var(--display);
+      font-style: italic;
+      font-weight: 400;
+      font-size: 18px;
+      color: var(--ink-soft);
+      max-width: 36ch;
+      text-align: right;
+      line-height: 1.3;
+    }
+    .mast-subtitle strong { color: var(--ink); font-weight: 600; font-style: normal; letter-spacing: 0.02em; }
+
+    .mast-strip {
+      margin-top: 18px;
+      padding-top: 14px;
+      border-top: 1px solid var(--ink);
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+      font-family: var(--narrow);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 11.5px;
+      color: var(--ink-soft);
+    }
+    .mast-strip .strip-sep {
+      width: 1px; height: 16px; background: var(--rule-strong);
+    }
+    .mast-strip label {
+      color: var(--ink-soft);
+    }
+
+    /* Cue chip (channel / guild / IDs) */
+    .cue {
+      display: inline-flex; align-items: baseline; gap: 6px;
+      font-family: var(--mono);
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: 11.5px;
+      color: var(--ink-2);
+      padding: 3px 8px;
+      background: var(--paper-warm);
+      border: 1px solid var(--rule-strong);
+      border-radius: 0;
+    }
+
+    /* The big "dispatch" button — stamped, bold */
+    .press {
+      appearance: none;
+      font-family: var(--narrow);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 12px;
+      padding: 10px 18px 9px;
+      background: var(--ink);
+      color: var(--paper);
+      border: 0;
+      cursor: pointer;
+      position: relative;
+      transition: transform 120ms ease, background 180ms ease;
+    }
+    .press:hover { background: var(--jaune-dark); color: var(--ink); transform: translate(-1px, -1px); box-shadow: 2px 2px 0 var(--ink); }
+    .press:active { transform: translate(0, 0); box-shadow: 0 0 0 transparent; }
+
+    /* Dossard-style toggle: a numbered bib-ish container for the checkbox + label */
+    .bib {
+      display: inline-flex; align-items: center; gap: 10px;
+      padding: 6px 12px 6px 8px;
+      background: var(--jaune);
+      border: 1.5px solid var(--ink);
+      font-family: var(--narrow);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 11.5px;
+      color: var(--ink);
+      cursor: pointer;
+      user-select: none;
+    }
+    .bib input[type="checkbox"] {
+      width: 14px; height: 14px; margin: 0;
+      accent-color: var(--ink);
+      cursor: pointer;
+    }
+
+    /* Bot online "stamp" */
+    #gateway-status { display: inline-flex; align-items: center; }
+    #gateway-status .badge {
+      /* inherits .badge below */
+    }
+
+    .hx-indicator { opacity: 0; transition: opacity 160ms ease; }
+    .htmx-request .hx-indicator { opacity: 1; }
+    .htmx-request.hx-indicator { opacity: 1; }
+
+    /* ──────────────────────────────────────────────────────────────── page */
+    .page {
+      display: grid;
+      grid-template-columns: 300px 1fr 280px 300px;
+      gap: 0;
+      border-top: 1px solid var(--ink);
+      border-bottom: 1px solid var(--ink);
+      min-height: calc(100vh - 340px);
+      animation: paperIn 620ms ease-out 120ms both;
+    }
+    .col {
+      padding: 22px 24px 28px;
+      border-right: 1px solid var(--rule-strong);
+      overflow: auto;
+      position: relative;
+    }
+    .col:last-child { border-right: 0; }
+    .col::-webkit-scrollbar { width: 8px; }
+    .col::-webkit-scrollbar-thumb { background: var(--rule-strong); }
+
+    .col-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding-bottom: 12px;
+      margin-bottom: 16px;
+      border-bottom: 2px solid var(--ink);
+    }
+    .col-head .section-no {
+      font-family: var(--display);
+      font-style: italic;
+      font-weight: 400;
+      font-size: 22px;
+      color: var(--jaune-dark);
+      line-height: 1;
+    }
+    .col-head .section-title {
+      font-family: var(--display);
+      font-style: italic;
+      font-weight: 500;
+      font-size: 22px;
+      line-height: 1.1;
+      color: var(--ink);
+      letter-spacing: -0.005em;
+    }
+    .col-head .section-label {
+      font-family: var(--narrow);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      font-size: 10px;
+      color: var(--ink-soft);
+      margin-top: 2px;
+    }
+
+    /* ──────────────────────────────────────────────────────────────── dispatch list (messages) */
+    #message-list .msg {
+      position: relative;
+      display: block;
+      padding: 14px 14px 14px 38px;
+      margin: 0 -8px;
+      cursor: pointer;
+      border-top: 1px solid transparent;
+      border-bottom: 1px solid var(--rule);
+      transition: background 160ms ease, border-color 160ms ease;
+    }
+    #message-list .msg::before {
+      content: counter(msg-n, decimal-leading-zero);
+      counter-increment: msg-n;
+      position: absolute;
+      left: 8px; top: 17px;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--gray);
+      letter-spacing: 0.04em;
+    }
+    #message-list { counter-reset: msg-n; }
+    #message-list .msg:hover {
+      background: var(--jaune-wash);
+      border-bottom-color: var(--jaune-dark);
+    }
+    #message-list .msg.selected {
+      background: var(--paper-warm);
+      border-top-color: var(--ink);
+      border-bottom-color: var(--ink);
+    }
+    #message-list .msg.selected::after {
+      content: "";
+      position: absolute;
+      left: 0; right: 0; bottom: -1px; height: 3px;
+      background: var(--jaune);
+    }
+    #message-list .msg .meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-family: var(--narrow);
+      font-size: 10.5px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+    #message-list .msg .meta::after { content: "§"; color: var(--gray); margin-left: auto; }
+    #message-list .msg .preview {
+      margin-top: 6px;
+      font-family: var(--display);
+      font-style: italic;
+      font-size: 15px;
+      line-height: 1.35;
+      color: var(--ink);
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    /* ──────────────────────────────────────────────────────────────── compose */
+    .compose-wrap {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 14px;
+      height: 100%;
+    }
+    .compose-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 22px;
+      height: 100%;
+    }
+    .field label {
+      display: flex; align-items: baseline; justify-content: space-between;
+      font-family: var(--narrow);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      font-size: 10px;
+      color: var(--ink-soft);
+      margin-bottom: 6px;
+      gap: 10px;
+    }
+    .field textarea,
+    .field input {
+      width: 100%;
+      background: var(--paper-warm);
+      color: var(--ink);
+      border: 1px solid var(--rule-strong);
+      padding: 14px 16px;
+      border-radius: 0;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.55;
+      resize: none;
+      outline: none;
+      transition: border-color 160ms ease, background 160ms ease;
+    }
+    .field textarea:focus,
+    .field input:focus {
+      border-color: var(--ink);
+      background: var(--paper);
+    }
+    .field textarea {
+      height: 100%;
+      min-height: 360px;
+    }
+    .field.caption textarea {
+      font-family: var(--sans);
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--ink);
+    }
+    #char-counter {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0;
+      text-transform: none;
+      color: var(--gray);
+    }
+    #char-counter.over { color: var(--red); font-weight: 600; }
+
+    .compose-actions {
+      display: flex; gap: 10px; align-items: center;
+    }
+
+    /* ──────────────────────────────────────────────────────────────── plaque (image preview) */
+    .plaque {
+      padding: 14px;
+      background: var(--paper-warm);
+      border: 1px solid var(--ink);
+      position: relative;
+    }
+    .plaque::before {
+      content: "La Plaque";
+      position: absolute;
+      top: -10px; left: 12px;
+      padding: 0 8px;
+      background: var(--paper);
+      font-family: var(--display);
+      font-style: italic;
+      font-size: 13px;
+      color: var(--ink-soft);
+    }
+    #image-preview { min-height: 340px; display: grid; gap: 10px; }
+    #image-preview img {
+      width: 100%;
+      border: 1px solid var(--ink);
+      display: block;
+      filter: contrast(1.02) saturate(0.98);
+    }
+    #image-preview p.muted {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--ink-soft);
+      margin: 0;
+      word-break: break-all;
+    }
+
+    /* ──────────────────────────────────────────────────────────────── répertoire (handles) */
+    .repertoire-note {
+      font-family: var(--display);
+      font-style: italic;
+      color: var(--ink-soft);
+      font-size: 13px;
+      margin: 4px 0 18px;
+      border-left: 2px solid var(--jaune);
+      padding-left: 10px;
+    }
+    .handle-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 6px;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px dotted var(--rule-strong);
+    }
+    .handle-row input {
+      width: 100%;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid var(--rule-strong);
+      padding: 4px 0;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--ink);
+      outline: none;
+      border-radius: 0;
+    }
+    .handle-row input:focus { border-bottom-color: var(--ink); }
+    .handle-row input::placeholder { color: var(--gray); font-style: italic; }
+    .handle-row button {
+      border: 1px solid var(--rule-strong);
+      background: var(--paper);
+      color: var(--ink-soft);
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 2px 8px;
+      cursor: pointer;
+      border-radius: 0;
+      transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+    }
+    .handle-row button:hover {
+      border-color: var(--red);
+      color: var(--red);
+      background: var(--paper);
+    }
+    .add-row {
+      margin-top: 12px;
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px dashed var(--rule-strong);
+      font-family: var(--narrow);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 10.5px;
+      color: var(--ink-soft);
+      cursor: pointer;
+      transition: border-color 160ms ease, color 160ms ease;
+    }
+    .add-row:hover { border-color: var(--ink); color: var(--ink); }
+
+    /* ──────────────────────────────────────────────────────────────── badges (server-rendered) */
+    .badge {
+      display: inline-flex; align-items: center;
+      font-family: var(--narrow);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 10px;
+      padding: 3px 9px 2px;
+      border: 1.5px solid var(--ink);
+      background: var(--paper);
+      color: var(--ink);
+      border-radius: 0;
+      line-height: 1.4;
+    }
+    .badge.ok {
+      background: var(--jaune);
+      color: var(--ink);
+      border-color: var(--ink);
+    }
+    .badge.warn {
+      background: var(--paper);
+      color: var(--ink);
+      border: 1.5px dashed var(--ink);
+    }
+    .badge.err {
+      background: var(--red);
+      color: var(--paper);
+      border-color: var(--red);
+    }
+    .badge.muted {
+      background: var(--paper);
+      color: var(--gray);
+      border-color: var(--rule-strong);
+    }
+
+    .muted { color: var(--ink-soft); }
+    code {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--ink);
+      background: transparent;
+      padding: 0;
+    }
+
+    /* ──────────────────────────────────────────────────────────────── télex (log) */
+    .telex {
+      border-top: 1px solid var(--ink);
+      background: repeating-linear-gradient(
+        to bottom,
+        var(--paper) 0 30px,
+        var(--paper-warm) 30px 60px
+      );
+      padding: 14px 42px 18px;
+      animation: paperIn 720ms ease-out 240ms both;
+    }
+    .telex-head {
+      display: flex; align-items: baseline; gap: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--ink);
+      margin-bottom: 8px;
+    }
+    .telex-head .num {
+      font-family: var(--display);
+      font-style: italic;
+      font-size: 20px;
+      color: var(--jaune-dark);
+    }
+    .telex-head .title {
+      font-family: var(--display);
+      font-style: italic;
+      font-weight: 500;
+      font-size: 20px;
+    }
+    .telex-head .lbl {
+      font-family: var(--narrow);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      font-size: 10px;
+      color: var(--ink-soft);
+      margin-left: auto;
+    }
+
+    #poller-log {
+      height: 140px;
+      overflow: auto;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      line-height: 1.6;
+      color: var(--ink-2);
+    }
+    #poller-log .line {
+      padding: 2px 0;
+      counter-increment: telex-n;
+      border-bottom: 1px dotted transparent;
+      animation: fadeUp 280ms ease-out both;
+    }
+    #poller-log { counter-reset: telex-n; }
+    #poller-log .line::before {
+      content: "№ " counter(telex-n, decimal-leading-zero);
+      color: var(--gray);
+      padding-right: 12px;
+      font-size: 10.5px;
+    }
+    #poller-log .line.ok { color: var(--green); }
+    #poller-log .line.ok::before { color: var(--green); opacity: 0.8; }
+    #poller-log .line.err { color: var(--red); }
+    #poller-log .line.err::before { color: var(--red); opacity: 0.8; }
+
+    /* ──────────────────────────────────────────────────────────────── utilities */
+    .spacer { flex: 1; }
+
+    @keyframes paperIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(3px); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    /* Ornamental SVG bar under the masthead subtitle */
+    .wheel-ornament {
+      display: block;
+      height: 14px;
+      opacity: 0.6;
+    }
+
+    /* Responsive: collapse columns on narrow screens. */
+    @media (max-width: 1200px) {
+      .page { grid-template-columns: 1fr; }
+      .col { border-right: 0; border-bottom: 1px solid var(--rule-strong); }
+      .compose-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <div class="topbar">
-    <b>discord_to_insta</b>
-    <span class="muted">bot:</span><span id="gateway-status"
-      hx-get="/api/gateway/status" hx-trigger="load, every 5s">…</span>
-    <span class="muted">channel:</span><span class="chip" id="channel-id-chip">…</span>
-    <span class="muted">guild:</span><span class="chip" id="guild-id-chip">…</span>
-    <button hx-post="/api/fetch"
-            hx-target="#message-list"
-            hx-indicator="#fetch-indicator"
-            hx-trigger="click, load delay:200ms, every 30s"
-            class="primary">Fetch recent</button>
-    <span id="fetch-indicator" class="hx-indicator badge muted">fetching…</span>
-    <span style="flex:1"></span>
-    <label class="row" style="margin:0">
-      <input type="checkbox" id="poller-toggle"
-        hx-post="/api/poller/toggle"
-        hx-target="#poller-status"
-        hx-swap="innerHTML"
-        style="width:auto">
-      auto-react
-    </label>
-    <span id="poller-status" class="badge muted"
-      hx-get="/api/poller/status" hx-trigger="load">…</span>
-  </div>
 
-  <div class="layout">
-    <div class="panel" id="messages-panel">
-      <h2>Recent messages</h2>
-      <div id="message-list" class="msg-list">
-        <p class="muted">Click <b>Fetch recent</b> to load messages.</p>
-      </div>
+  <header class="masthead">
+    <div class="mast-rule">
+      <div><b>L’Équipe du Soir</b> <span class="sep">—</span> édition permanente</div>
+      <div class="edition-no">№ <span id="edition-no">001</span></div>
+      <div id="mast-date">—</div>
     </div>
 
-    <div class="panel" id="convert-panel">
-      <h2>Convert</h2>
+    <div class="mast-title">
+      <h1>discord<span class="amp"> &amp; </span>insta</h1>
+      <p class="mast-subtitle">
+        Pupitre de composition<br>
+        pour les annonces de <strong>Mayo Jaune</strong>.
+      </p>
+    </div>
+
+    <svg class="wheel-ornament" viewBox="0 0 600 14" preserveAspectRatio="none" aria-hidden="true">
+      <line x1="0" y1="7" x2="600" y2="7" stroke="#141210" stroke-width="0.5"/>
+      <g fill="#141210">
+        <circle cx="6" cy="7" r="2"/>
+        <circle cx="594" cy="7" r="2"/>
+      </g>
+      <g stroke="#141210" stroke-width="0.6">
+        <path d="M20 7 L28 2 L36 7 L28 12 Z"/>
+        <path d="M564 7 L572 2 L580 7 L572 12 Z"/>
+      </g>
+    </svg>
+
+    <div class="mast-strip">
+      <label>Bot</label>
+      <span id="gateway-status" hx-get="/api/gateway/status" hx-trigger="load, every 5s">…</span>
+      <span class="strip-sep"></span>
+      <label>Salon</label>
+      <span class="cue" id="channel-id-chip">…</span>
+      <span class="strip-sep"></span>
+      <label>Guilde</label>
+      <span class="cue" id="guild-id-chip">…</span>
+      <span class="strip-sep"></span>
+      <button class="press"
+              hx-post="/api/fetch"
+              hx-target="#message-list"
+              hx-indicator="#fetch-indicator"
+              hx-trigger="click, load delay:200ms, every 30s">Relever la dépêche</button>
+      <span id="fetch-indicator" class="hx-indicator badge muted">en cours…</span>
+
+      <span class="spacer"></span>
+
+      <label class="bib" title="auto-react aux nouvelles annonces">
+        <input type="checkbox" id="poller-toggle"
+               hx-post="/api/poller/toggle"
+               hx-target="#poller-status"
+               hx-swap="innerHTML">
+        Réactions auto&nbsp;✅&nbsp;🚫&nbsp;🤔
+      </label>
+      <span id="poller-status" class="badge muted"
+            hx-get="/api/poller/status" hx-trigger="load">—</span>
+    </div>
+  </header>
+
+  <main class="page">
+
+    <!-- § I — DÉPÊCHES -->
+    <section class="col">
+      <div class="col-head">
+        <div>
+          <div class="section-no">§ I</div>
+          <div class="section-title">Dépêches</div>
+          <div class="section-label">du salon d’annonce</div>
+        </div>
+      </div>
+      <div id="message-list">
+        <p class="muted" style="font-family: var(--display); font-style: italic; font-size: 14px;">
+          Rien à signaler. Cliquez <em>Relever la dépêche</em>&nbsp;ci-dessus.
+        </p>
+      </div>
+    </section>
+
+    <!-- § II — LABORATOIRE -->
+    <section class="col">
+      <div class="col-head">
+        <div>
+          <div class="section-no">§ II</div>
+          <div class="section-title">Le Laboratoire</div>
+          <div class="section-label">composition &amp; épreuve</div>
+        </div>
+      </div>
+
       <form id="convert-form"
-        hx-post="/api/preview"
-        hx-target="#preview-output"
-        hx-trigger="input changed delay:300ms from:find textarea, input changed delay:300ms from:find input, click from:find button[type=submit]"
-        hx-swap="innerHTML">
-        <div class="two-col">
-          <div>
-            <label>Discord source</label>
-            <textarea name="raw" rows="26" placeholder="Pick a message on the left, or paste one here…"></textarea>
-          </div>
-          <div>
-            <label>Instagram caption <span class="char-counter" id="char-counter"></span></label>
-            <div id="preview-output">
-              <textarea readonly rows="26" placeholder="Preview will appear here…"></textarea>
-            </div>
+            class="compose-grid"
+            hx-post="/api/preview"
+            hx-target="#preview-output"
+            hx-trigger="input changed delay:300ms from:find textarea, input changed delay:300ms from:find input, click from:find button[type=submit]"
+            hx-swap="innerHTML">
+
+        <div class="field">
+          <label><span>Source Discord</span></label>
+          <textarea name="raw" placeholder="Collez la dépêche Discord, ou sélectionnez-en une dans § I…"></textarea>
+        </div>
+
+        <div class="field caption">
+          <label>
+            <span>Épreuve Instagram</span>
+            <span class="compose-actions">
+              <span id="char-counter">0 / 2200</span>
+            </span>
+          </label>
+          <div id="preview-output" style="height: 100%; display: flex;">
+            <textarea readonly placeholder="L’épreuve apparaîtra ici dès qu’une source sera saisie."></textarea>
           </div>
         </div>
       </form>
-    </div>
+    </section>
 
-    <div class="panel" id="image-panel">
-      <h2>Post image</h2>
-      <div id="image-preview" class="image-preview">
-        <p class="muted">Paste a message with <code>Distance : Nkm</code> to auto-pick.</p>
+    <!-- § III — PLAQUE -->
+    <section class="col">
+      <div class="col-head">
+        <div>
+          <div class="section-no">§ III</div>
+          <div class="section-title">La Plaque</div>
+          <div class="section-label">gabarit par kilométrage</div>
+        </div>
       </div>
-    </div>
+      <div class="plaque">
+        <div id="image-preview" class="image-preview">
+          <p class="muted">
+            Aucune distance repérée. La dépêche doit contenir <code>Distance : Nkm</code>.
+          </p>
+        </div>
+      </div>
+    </section>
 
-    <div class="panel" id="handles-panel">
-      <h2>ID → Instagram handle</h2>
-      <p class="muted" style="font-size:11px">Mentions not in this table are removed.</p>
+    <!-- § IV — RÉPERTOIRE -->
+    <section class="col">
+      <div class="col-head">
+        <div>
+          <div class="section-no">§ IV</div>
+          <div class="section-title">Répertoire</div>
+          <div class="section-label">ID Discord → @instagram</div>
+        </div>
+      </div>
+      <p class="repertoire-note">
+        Les mentions absentes de ce répertoire sont simplement retirées de l’épreuve.
+      </p>
       <div id="handle-rows">
         <div class="handle-row">
-          <input name="handle_id_0" placeholder="Discord user ID" form="convert-form">
+          <input name="handle_id_0" placeholder="ID Discord" form="convert-form">
           <input name="handle_user_0" placeholder="@handle" form="convert-form">
           <button type="button" onclick="removeHandleRow(this)">✕</button>
         </div>
       </div>
-      <button type="button" onclick="addHandleRow()">+ add row</button>
-    </div>
-  </div>
+      <button type="button" class="add-row" onclick="addHandleRow()">+ ajouter une ligne</button>
+    </section>
 
-  <div class="log" id="poller-log"
-    hx-get="/api/poller/log" hx-trigger="load, every 3s" hx-swap="innerHTML">
-    <span class="muted">log loading…</span>
-  </div>
+  </main>
+
+  <!-- § V — TÉLEX -->
+  <section class="telex">
+    <div class="telex-head">
+      <span class="num">§ V</span>
+      <span class="title">Télex</span>
+      <span class="lbl" id="log-label">journal des dépêches auto-réactions · mise à jour continue</span>
+    </div>
+    <div id="poller-log"
+         hx-get="/api/poller/log" hx-trigger="load, every 3s" hx-swap="innerHTML">
+      <span class="muted">chargement du journal…</span>
+    </div>
+  </section>
 
   <script>
-    let handleRowCounter = 1;
+    /* ── today's date in French, long form ────────────────────────────── */
+    (function setDate() {
+      try {
+        const d = new Date();
+        const fmt = d.toLocaleDateString('fr-FR', {
+          weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
+        });
+        document.getElementById('mast-date').textContent = fmt;
+        // Stable, whimsical "edition number" derived from the day-of-year.
+        const start = new Date(d.getFullYear(), 0, 0);
+        const diff = (d - start) + ((start.getTimezoneOffset() - d.getTimezoneOffset()) * 60000);
+        const doy = Math.floor(diff / 86400000);
+        document.getElementById('edition-no').textContent = String(doy).padStart(3, '0');
+      } catch (_) {}
+    })();
 
-    // Fires a bubbling `input` event on the Discord-source textarea so the
-    // form's `input from:find textarea` trigger matches and htmx re-posts
-    // the preview. Needed any time something outside the textarea changes
-    // the caption (handle rows added/removed/edited, message loaded from
-    // the list, etc.) — htmx won't refresh on its own.
-    function refreshPreview() {
-      const ta = document.querySelector('#convert-form textarea[name=raw]');
-      if (ta) ta.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-
-    function removeHandleRow(btn) {
-      btn.parentElement.remove();
-      refreshPreview();
-    }
-
-    function addHandleRow() {
-      const container = document.getElementById('handle-rows');
-      const row = document.createElement('div');
-      row.className = 'handle-row';
-      row.innerHTML = `
-        <input name="handle_id_${handleRowCounter}" placeholder="Discord user ID" form="convert-form">
-        <input name="handle_user_${handleRowCounter}" placeholder="@handle" form="convert-form">
-        <button type="button" onclick="removeHandleRow(this)">✕</button>
-      `;
-      container.appendChild(row);
-      handleRowCounter++;
-    }
-
-    // Typing in any handle field should refresh the preview. Live-binding
-    // on the container (not the fields themselves) so dynamically-added
-    // rows are covered without re-registering.
-    document.getElementById('handle-rows').addEventListener('input', refreshPreview);
-
-    // Load initial config into the topbar chips.
+    /* ── topbar config chips ──────────────────────────────────────────── */
     fetch('/api/config').then(r => r.json()).then(cfg => {
-      document.getElementById('channel-id-chip').textContent = cfg.channel_id || '(unset)';
-      document.getElementById('guild-id-chip').textContent = cfg.guild_id || '(unset)';
-    });
+      document.getElementById('channel-id-chip').textContent = cfg.channel_id || '—';
+      document.getElementById('guild-id-chip').textContent = cfg.guild_id || '—';
+    }).catch(() => {});
 
-    // Sync the auto-react checkbox with the real poller state. The server
-    // auto-starts the poller on launch when DISCORD_BOT_TOKEN is set, so the
-    // UI needs to reflect that without the user having to click. Also polls
-    // every 5 s so manual CLI toggles or crashes surface in the UI.
+    /* ── poller checkbox sync with server state ──────────────────────── */
     function syncPollerCheckbox() {
       fetch('/api/poller/running').then(r => r.text()).then(t => {
         document.getElementById('poller-toggle').checked = (t.trim() === '1');
@@ -185,19 +827,42 @@
     syncPollerCheckbox();
     setInterval(syncPollerCheckbox, 5000);
 
-    // Clicking a message in the list fills the textarea and triggers preview.
+    /* ── refresh the preview from outside the textarea ───────────────── */
+    function refreshPreview() {
+      const ta = document.querySelector('#convert-form textarea[name=raw]');
+      if (ta) ta.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    /* ── handle-row add / remove ──────────────────────────────────────── */
+    let handleRowCounter = 1;
+    function removeHandleRow(btn) {
+      btn.parentElement.remove();
+      refreshPreview();
+    }
+    function addHandleRow() {
+      const container = document.getElementById('handle-rows');
+      const row = document.createElement('div');
+      row.className = 'handle-row';
+      row.innerHTML =
+        '<input name="handle_id_' + handleRowCounter + '" placeholder="ID Discord" form="convert-form">' +
+        '<input name="handle_user_' + handleRowCounter + '" placeholder="@handle" form="convert-form">' +
+        '<button type="button" onclick="removeHandleRow(this)">✕</button>';
+      container.appendChild(row);
+      handleRowCounter++;
+    }
+    document.getElementById('handle-rows').addEventListener('input', refreshPreview);
+
+    /* ── clicking a dépêche loads it into the source textarea ────────── */
     document.addEventListener('click', e => {
       const msg = e.target.closest('.msg');
       if (!msg) return;
       const content = msg.dataset.content;
       if (content == null) return;
-      document.querySelectorAll('.msg-list .msg.selected').forEach(el => el.classList.remove('selected'));
+      document.querySelectorAll('#message-list .msg.selected').forEach(el => el.classList.remove('selected'));
       msg.classList.add('selected');
-      // Remember on the container so auto-refresh can restore it.
       document.getElementById('message-list').dataset.selectedId = msg.dataset.id || '';
       const ta = document.querySelector('#convert-form textarea[name=raw]');
       ta.value = content;
-      // Auto-seed handle rows from mention IDs in the data attribute.
       try {
         const mentionIds = JSON.parse(msg.dataset.mentions || '[]');
         for (const id of mentionIds) {
@@ -210,35 +875,25 @@
             last.querySelector('input[name^=handle_id_]').value = id;
           }
         }
-      } catch (_) { /* ignore */ }
+      } catch (_) {}
       refreshPreview();
     });
 
-    // Poller toggle: when the checkbox changes, decide what hx-post sent; but
-    // htmx already fires the POST. We just need the preflight to pass the desired
-    // state. Use hx-vals via the checkbox's `checked` property.
-    const toggle = document.getElementById('poller-toggle');
-    toggle.addEventListener('htmx:configRequest', (e) => {
-      e.detail.parameters['enabled'] = toggle.checked ? '1' : '0';
-    });
-
-    // Update the character counter whenever the preview updates.
+    /* ── post-swap polishing: character counter + selection restore ───── */
     document.body.addEventListener('htmx:afterSwap', (e) => {
       if (e.target.id === 'preview-output') {
         const out = e.target.querySelector('textarea');
         const counter = document.getElementById('char-counter');
         if (out && counter) {
           const n = [...out.value].length;
-          counter.textContent = `${n} / 2200`;
+          counter.textContent = n + ' / 2200';
           counter.classList.toggle('over', n > 2200);
         }
       }
-      // Re-apply selection highlight after the message list auto-refreshes
-      // so the user doesn't lose their place mid-edit.
       if (e.target.id === 'message-list') {
         const selectedId = e.target.dataset.selectedId;
         if (selectedId) {
-          const match = e.target.querySelector(`.msg[data-id="${CSS.escape(selectedId)}"]`);
+          const match = e.target.querySelector('.msg[data-id="' + CSS.escape(selectedId) + '"]');
           if (match) match.classList.add('selected');
         }
       }
