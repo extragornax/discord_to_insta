@@ -28,6 +28,7 @@ const DEFAULT_IMAGES_DIR: &str = "images";
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_FETCH_LIMIT: u32 = 50;
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
+const REACT_DELAY: Duration = Duration::from_secs(1);
 const REACTION_EMOJIS: &[&str] = &["✅", "🚫", "🤔"];
 const LOG_MAX_LINES: usize = 40;
 const INDEX_HTML: &str = include_str!("index.html");
@@ -87,6 +88,13 @@ async fn main() {
         last_seen_id: Arc::new(Mutex::new(last_seen)),
     };
 
+    // Auto-start the poller so the bot keeps reacting even when no operator
+    // is watching. Skipped silently if the token is empty — starting would
+    // just error-log every 30 s.
+    if !config.token.is_empty() {
+        start_poller(&ctx).await;
+    }
+
     let app = Router::new()
         .route("/", get(index))
         .route("/api/config", get(api_config))
@@ -94,6 +102,7 @@ async fn main() {
         .route("/api/preview", post(api_preview))
         .route("/api/poller/toggle", post(api_poller_toggle))
         .route("/api/poller/status", get(api_poller_status))
+        .route("/api/poller/running", get(api_poller_running))
         .route("/api/poller/log", get(api_poller_log))
         .nest_service("/images", ServeDir::new(config.images_dir.clone()))
         .with_state(ctx);
@@ -212,6 +221,14 @@ async fn api_poller_toggle(
 
 async fn api_poller_status(State(ctx): State<AppCtx>) -> Html<String> {
     render_poller_status(&ctx).await
+}
+
+async fn api_poller_running(State(ctx): State<AppCtx>) -> &'static str {
+    if ctx.poller.lock().await.is_some() {
+        "1"
+    } else {
+        "0"
+    }
 }
 
 async fn api_poller_log(State(ctx): State<AppCtx>) -> Html<String> {
@@ -431,14 +448,23 @@ async fn handle_batch(ctx: &AppCtx, messages: Vec<Message>) -> std::io::Result<(
     new_msgs.reverse(); // process oldest-first
 
     for msg in new_msgs {
-        let mut all_ok = true;
+        let mut all_done = true;
         for emoji in REACTION_EMOJIS {
+            // Skip emojis already recorded as placed — survives restarts and
+            // crash-mid-batch without re-hitting the API.
+            if persisted.has_reacted(&ctx.config.channel_id, &msg.id, emoji) {
+                continue;
+            }
             match ctx
                 .client
                 .add_reaction(&ctx.config.channel_id, &msg.id, emoji)
                 .await
             {
                 Ok(()) => {
+                    persisted.record_reaction(&ctx.config.channel_id, &msg.id, emoji);
+                    // Persist after every successful reaction so an
+                    // interrupted batch picks up exactly where it stopped.
+                    persisted.save(&ctx.config.state_path)?;
                     push_log(
                         &ctx.poller_log,
                         &format!("reacted {emoji} on {}", msg.id),
@@ -451,15 +477,20 @@ async fn handle_batch(ctx: &AppCtx, messages: Vec<Message>) -> std::io::Result<(
                         &format!("error reacting {emoji} on {}: {e}", msg.id),
                     )
                     .await;
-                    all_ok = false;
+                    all_done = false;
                     break;
                 }
             }
+            // Deliberate pacing — Discord's message-reaction bucket is
+            // tight (roughly 1 reaction/sec per channel); this keeps us
+            // comfortably under without hitting 429s.
+            tokio::time::sleep(REACT_DELAY).await;
         }
-        if all_ok {
+        if all_done {
             persisted
                 .last_reacted_by_channel
                 .insert(ctx.config.channel_id.clone(), msg.id.clone());
+            persisted.clear_reactions(&ctx.config.channel_id, &msg.id);
             persisted.save(&ctx.config.state_path)?;
             *ctx.last_seen_id.lock().await = Some(msg.id.clone());
         } else {

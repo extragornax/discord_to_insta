@@ -54,7 +54,11 @@
     <b>discord_to_insta</b>
     <span class="muted">channel:</span><span class="chip" id="channel-id-chip">…</span>
     <span class="muted">guild:</span><span class="chip" id="guild-id-chip">…</span>
-    <button hx-post="/api/fetch" hx-target="#message-list" hx-indicator="#fetch-indicator" class="primary">Fetch recent</button>
+    <button hx-post="/api/fetch"
+            hx-target="#message-list"
+            hx-indicator="#fetch-indicator"
+            hx-trigger="click, load delay:200ms, every 30s"
+            class="primary">Fetch recent</button>
     <span id="fetch-indicator" class="hx-indicator badge muted">fetching…</span>
     <span style="flex:1"></span>
     <label class="row" style="margin:0">
@@ -148,6 +152,18 @@
       document.getElementById('guild-id-chip').textContent = cfg.guild_id || '(unset)';
     });
 
+    // Sync the auto-react checkbox with the real poller state. The server
+    // auto-starts the poller on launch when DISCORD_BOT_TOKEN is set, so the
+    // UI needs to reflect that without the user having to click. Also polls
+    // every 5 s so manual CLI toggles or crashes surface in the UI.
+    function syncPollerCheckbox() {
+      fetch('/api/poller/running').then(r => r.text()).then(t => {
+        document.getElementById('poller-toggle').checked = (t.trim() === '1');
+      }).catch(() => {});
+    }
+    syncPollerCheckbox();
+    setInterval(syncPollerCheckbox, 5000);
+
     // Clicking a message in the list fills the textarea and triggers preview.
     document.addEventListener('click', e => {
       const msg = e.target.closest('.msg');
@@ -156,6 +172,8 @@
       if (content == null) return;
       document.querySelectorAll('.msg-list .msg.selected').forEach(el => el.classList.remove('selected'));
       msg.classList.add('selected');
+      // Remember on the container so auto-refresh can restore it.
+      document.getElementById('message-list').dataset.selectedId = msg.dataset.id || '';
       const ta = document.querySelector('#convert-form textarea[name=raw]');
       ta.value = content;
       // Auto-seed handle rows from mention IDs in the data attribute.
@@ -192,6 +210,15 @@
           const n = [...out.value].length;
           counter.textContent = `${n} / 2200`;
           counter.classList.toggle('over', n > 2200);
+        }
+      }
+      // Re-apply selection highlight after the message list auto-refreshes
+      // so the user doesn't lose their place mid-edit.
+      if (e.target.id === 'message-list') {
+        const selectedId = e.target.dataset.selectedId;
+        if (selectedId) {
+          const match = e.target.querySelector(`.msg[data-id="${CSS.escape(selectedId)}"]`);
+          if (match) match.classList.add('selected');
         }
       }
     });

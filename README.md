@@ -71,13 +71,17 @@ Decimals round to the nearest integer (`19.7 km` → picks `_20.*`; `19.5 km` �
 
 ## Auto-react bot
 
-Tick **auto-react** in the topbar to start the poller. Every 30 s it fetches the 50 most recent channel messages and compares them against the last-reacted snowflake ID stored in `state.json`:
+The poller **auto-starts on launch** when `DISCORD_BOT_TOKEN` is set — the service is meant to run unattended. You don't have to click anything; the UI checkbox just reflects current state and lets you turn it off if you need to. Every 30 s it fetches the 50 most recent channel messages and compares them against the last-reacted snowflake ID in `state.json`:
 
 - **First run for a channel:** silently record the newest message ID — no retroactive reactions.
 - **Subsequent runs:** react with ✅ 🚫 🤔 (in that order) to anything newer, oldest-first so a mid-batch crash resumes cleanly.
+- **Per-emoji idempotence.** State persists after *each* successful reaction — a restart mid-batch picks up exactly where it stopped. You won't see duplicate API calls or double reactions.
+- **1 s delay** between every Discord API call keeps the bot well under the message-reaction rate-limit bucket.
 - **Errors** (rate limit, transient network, permission denied) land in the log tail at the bottom of the page; the poller keeps going and retries next cycle.
 
 The three emojis are hardcoded to match the Mayo Jaune announcement template's reaction legend. Edit `REACTION_EMOJIS` in `src/main.rs` if your template uses a different set.
+
+The message list in the UI also auto-refreshes every 30 s, so you don't need to click "Fetch recent" — just leave the page open.
 
 ## Security note
 
