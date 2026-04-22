@@ -68,7 +68,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Unauthorized => write!(f, "Discord rejected the bot token (401). Check DISCORD_BOT_TOKEN."),
-            Error::Forbidden => write!(f, "Bot lacks access to this channel (403). Invite it to the guild and grant View Channel + Read Message History."),
+            Error::Forbidden => write!(f, "Forbidden (403). Bot needs View Channel + Read Message History (fetch) and Add Reactions (auto-react)."),
             Error::NotFound => write!(f, "Channel not found (404). Wrong channel ID?"),
             Error::RateLimited { retry_after_ms } => write!(f, "Rate limited. Retry in {}ms.", retry_after_ms),
             Error::Http { status, body } => write!(f, "Discord HTTP {status}: {body}"),
@@ -117,24 +117,77 @@ impl Client {
             }
             Err(ureq::Error::Status(status, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
-                Err(match status {
-                    401 => Error::Unauthorized,
-                    403 => Error::Forbidden,
-                    404 => Error::NotFound,
-                    429 => {
-                        let ms = serde_json::from_str::<serde_json::Value>(&body)
-                            .ok()
-                            .and_then(|v| v.get("retry_after").and_then(|r| r.as_f64()))
-                            .map(|s| (s * 1000.0) as u64)
-                            .unwrap_or(0);
-                        Error::RateLimited { retry_after_ms: ms }
-                    }
-                    _ => Error::Http { status, body },
-                })
+                Err(map_status(status, body))
             }
             Err(ureq::Error::Transport(t)) => Err(Error::Transport(t.to_string())),
         }
     }
+
+    /// React to a message as the bot. `emoji` must be a Unicode emoji string
+    /// (e.g. "✅"). Custom emojis would need `name:id` form, not supported here.
+    pub fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<(), Error> {
+        let encoded = percent_encode(emoji);
+        let url = format!(
+            "{API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me"
+        );
+
+        let response = self
+            .agent
+            .put(&url)
+            .set("Authorization", &format!("Bot {}", self.token))
+            .set("Content-Length", "0")
+            .call();
+
+        match response {
+            Ok(_) => Ok(()),
+            Err(ureq::Error::Status(status, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                Err(map_status(status, body))
+            }
+            Err(ureq::Error::Transport(t)) => Err(Error::Transport(t.to_string())),
+        }
+    }
+}
+
+fn map_status(status: u16, body: String) -> Error {
+    match status {
+        401 => Error::Unauthorized,
+        403 => Error::Forbidden,
+        404 => Error::NotFound,
+        429 => {
+            let ms = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("retry_after").and_then(|r| r.as_f64()))
+                .map(|s| (s * 1000.0) as u64)
+                .unwrap_or(0);
+            Error::RateLimited { retry_after_ms: ms }
+        }
+        _ => Error::Http { status, body },
+    }
+}
+
+/// Minimal RFC 3986 percent-encoder. Unreserved chars pass through; everything
+/// else — including all UTF-8 continuation bytes of a non-ASCII emoji — is
+/// encoded as `%HH`.
+pub(crate) fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{:02X}", byte));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -175,5 +228,20 @@ mod tests {
         assert_eq!(msgs[0].author.display(), "u");
         assert!(msgs[0].attachments.is_empty());
         assert!(msgs[0].mentions.is_empty());
+    }
+
+    #[test]
+    fn percent_encode_emojis() {
+        // ✅ U+2705 — UTF-8 E2 9C 85
+        assert_eq!(percent_encode("✅"), "%E2%9C%85");
+        // 🚫 U+1F6AB — UTF-8 F0 9F 9A AB
+        assert_eq!(percent_encode("🚫"), "%F0%9F%9A%AB");
+        // 🤔 U+1F914 — UTF-8 F0 9F A4 94
+        assert_eq!(percent_encode("🤔"), "%F0%9F%A4%94");
+    }
+
+    #[test]
+    fn percent_encode_preserves_unreserved() {
+        assert_eq!(percent_encode("abcXYZ-_.~0189"), "abcXYZ-_.~0189");
     }
 }

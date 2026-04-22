@@ -81,4 +81,13 @@ The project will need Discord bot credentials and Instagram Graph API credential
 - Env var: `DISCORD_BOT_TOKEN` — read at startup by `App::new()`. If unset, the UI exposes a masked password field as a fallback. The token is never persisted to disk.
 - Target channel defaults to `981806074233507880` (Mayo Jaune announcements, guild `981525647891525642`). It's only a UI default — the field is editable. Update `DEFAULT_CHANNEL_ID` in `src/main.rs` if the canonical channel ever changes.
 - Ingestion is REST-only (`GET /channels/{id}/messages`) via `ureq`. No gateway, no tokio runtime — fetches run on a `std::thread` and stream results back through an `mpsc` channel so the egui event loop never blocks.
-- The bot needs `View Channel` + `Read Message History` on the announcement channel. No privileged intents required since we're not using the gateway.
+- The bot needs `View Channel` + `Read Message History` on the announcement channel. For the auto-react poller, it additionally needs `Add Reactions`. No privileged intents required since we're not using the gateway.
+
+### Auto-react poller
+
+- Lives in `run_poller` (`src/main.rs`). Polls the channel every `POLL_INTERVAL` (30 s) via the same REST client used for fetches, so no tokio runtime. Interruptible: the sleep loop checks the stop flag every 100 ms.
+- On first run for a channel it **bootstraps** — it records the current newest message ID into `state.json` without reacting. Historical messages are never reacted to retroactively.
+- "New" is determined by numeric comparison of Discord snowflake IDs (`state::is_newer_snowflake`). String comparison would misorder IDs of different lengths.
+- The three emojis are hardcoded in `REACTION_EMOJIS` (`✅ 🚫 🤔`) to match the announcement template's reaction legend. If the template's emojis change, update this const.
+- Persistent state: `$XDG_CONFIG_HOME/discord_to_insta/state.json` (falls back to `~/.config/…`). Schema: `{ last_reacted_by_channel: { channel_id: message_id } }`. Small by design; if it grows, split it.
+- The poller **does not auto-start** on launch — the user must opt in each session via the UI checkbox. This avoids accidentally reacting to a backlog after config changes.
