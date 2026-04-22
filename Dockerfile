@@ -33,6 +33,12 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /build/target/release/discord_to_insta /usr/local/bin/discord_to_insta
 
+# Pre-create /app/state with the correct ownership so that when docker (or
+# compose) populates the named volume on first run, it inherits these perms.
+# Without this the volume mounts as root-owned and the non-root `app` user
+# can't write state.json → "Permission denied (os error 13)".
+RUN mkdir -p /app/state && chown app:app /app/state
+
 # Defaults assume the compose file mounts images/ at /app/images and the state
 # file at /app/state/state.json. Override via env as needed.
 ENV PORT=8080 \
