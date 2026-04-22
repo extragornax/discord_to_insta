@@ -10,6 +10,32 @@ static ROLE_MENTION_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"<@&(\d+)>").unwr
 static TRAILING_TIMESTAMP_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?m)\n\s*\d+\s*[smhdw]\s*$").unwrap());
 
+// Custom Discord emojis: `<:name:12345>` or `<a:name:12345>` (animated).
+// Replace with `:name:` so the intent remains readable in the caption.
+static CUSTOM_EMOJI_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"<a?:([A-Za-z0-9_]+):\d+>").unwrap());
+
+// Markdown delimiters. Rust's `regex` crate has no native dotall toggle per
+// pattern; we use (?s) for the fenced-code block, and default mode (. does
+// NOT cross newlines) for everything else so delimiters only match within
+// a single paragraph.
+static CODE_FENCE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?s)```(?:[A-Za-z0-9_+-]*\n)?(.*?)\n?```").unwrap());
+static CODE_INLINE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`\n]+)`").unwrap());
+static BOLD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^\n]+?)\*\*").unwrap());
+static UNDERLINE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"__([^\n]+?)__").unwrap());
+static ITALIC_STAR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*([^\n\*]+?)\*").unwrap());
+static STRIKE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"~~([^\n]+?)~~").unwrap());
+static SPOILER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\|\|([^\n]+?)\|\|").unwrap());
+// Line-start markers (headings, subtext, blockquotes). Multiline mode so ^
+// matches the start of each line.
+static LINE_PREFIX_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^\s*(?:#{1,3}\s+|-#\s+|>>>\s?|>\s?)").unwrap());
+// Bracketed URLs — Discord wraps links in `<...>` to suppress the embed
+// preview. The brackets are noise in the caption.
+static BRACKET_URL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"<(https?://[^\s>]+)>").unwrap());
+
 /// Pure transformation: Discord announcement text → Instagram caption.
 ///
 /// `user_map` resolves Discord user IDs (as strings) to Instagram handles
@@ -44,9 +70,40 @@ pub fn discord_to_caption(raw: &str, user_map: &HashMap<String, String>) -> Stri
         .replace_all(&text, "voir Discord (lien en bio)")
         .into_owned();
 
-    // 6. Normalize whitespace introduced by the removals without collapsing
+    // 6. Custom emojis (`<:name:id>`) → `:name:` so intent is preserved.
+    text = replace_custom_emojis(&text);
+
+    // 7. Strip Discord markdown delimiters so the caption doesn't show
+    //    literal `**` or triple-backticks on Instagram (which doesn't render
+    //    them).
+    text = strip_markdown(&text);
+
+    // 8. Unwrap `<https://…>` bracketed URLs.
+    text = BRACKET_URL_RE.replace_all(&text, "$1").into_owned();
+
+    // 9. Normalize whitespace introduced by the removals without collapsing
     //    intentional blank lines in the body.
     collapse_inline_spaces(&text).trim().to_string()
+}
+
+/// Replace `<:name:id>` and `<a:name:id>` with `:name:`.
+pub(crate) fn replace_custom_emojis(text: &str) -> String {
+    CUSTOM_EMOJI_RE.replace_all(text, ":$1:").into_owned()
+}
+
+/// Strip Discord markdown delimiters while preserving the content they
+/// wrap. Intentionally conservative — does NOT strip single-underscore
+/// italic (`_foo_`) to avoid mangling `snake_case` / file names.
+pub(crate) fn strip_markdown(text: &str) -> String {
+    let mut out = CODE_FENCE_RE.replace_all(text, "$1").into_owned();
+    out = CODE_INLINE_RE.replace_all(&out, "$1").into_owned();
+    out = BOLD_RE.replace_all(&out, "$1").into_owned();
+    out = UNDERLINE_RE.replace_all(&out, "$1").into_owned();
+    out = ITALIC_STAR_RE.replace_all(&out, "$1").into_owned();
+    out = STRIKE_RE.replace_all(&out, "$1").into_owned();
+    out = SPOILER_RE.replace_all(&out, "$1").into_owned();
+    out = LINE_PREFIX_RE.replace_all(&out, "").into_owned();
+    out
 }
 
 fn find_reactions_block(text: &str) -> Option<usize> {
@@ -151,5 +208,77 @@ mod tests {
         let raw = "keep me\n\nRéactions :\n- A\n- B\ntrailing";
         let got = discord_to_caption(raw, &HashMap::new());
         assert_eq!(got, "keep me");
+    }
+
+    #[test]
+    fn custom_emoji_becomes_colon_name_colon() {
+        assert_eq!(replace_custom_emojis("Hello <:sparkles:12345>!"), "Hello :sparkles:!");
+        // Animated.
+        assert_eq!(replace_custom_emojis("<a:dance:987654>"), ":dance:");
+        // Multiple in one string.
+        assert_eq!(
+            replace_custom_emojis("<:one:111> and <:two:222>"),
+            ":one: and :two:"
+        );
+    }
+
+    #[test]
+    fn unicode_shortcodes_left_alone() {
+        // Plain `:sparkles:` is a Unicode emoji shortcode — no angle brackets,
+        // no numeric ID — so it must pass through untouched.
+        assert_eq!(replace_custom_emojis("keep :this: alone"), "keep :this: alone");
+    }
+
+    #[test]
+    fn markdown_bold_italic_strike() {
+        assert_eq!(strip_markdown("**bold** text"), "bold text");
+        assert_eq!(strip_markdown("*italic* here"), "italic here");
+        assert_eq!(strip_markdown("~~nope~~ yep"), "nope yep");
+    }
+
+    #[test]
+    fn markdown_underline_not_confused_with_snake_case() {
+        assert_eq!(strip_markdown("__underline__"), "underline");
+        // Crucially, single underscores stay — don't wreck file_name_here.
+        assert_eq!(strip_markdown("the file_name_here.txt"), "the file_name_here.txt");
+    }
+
+    #[test]
+    fn markdown_inline_code_and_fence() {
+        assert_eq!(strip_markdown("use `cargo test` please"), "use cargo test please");
+        assert_eq!(
+            strip_markdown("before\n```rust\nfn main() {}\n```\nafter"),
+            "before\nfn main() {}\nafter"
+        );
+    }
+
+    #[test]
+    fn markdown_headings_blockquotes_subtext_spoiler() {
+        assert_eq!(strip_markdown("# Big\n## Medium\n### Small"), "Big\nMedium\nSmall");
+        assert_eq!(strip_markdown("> quoted line\n> another"), "quoted line\nanother");
+        assert_eq!(strip_markdown(">>> big quote block"), "big quote block");
+        assert_eq!(strip_markdown("-# fine print"), "fine print");
+        assert_eq!(strip_markdown("||spoiler text||"), "spoiler text");
+    }
+
+    #[test]
+    fn bracketed_urls_unwrapped() {
+        let raw = "see <https://example.com/path?a=1> for details";
+        let got = discord_to_caption(raw, &HashMap::new());
+        assert_eq!(got, "see https://example.com/path?a=1 for details");
+    }
+
+    #[test]
+    fn combined_transform_with_markdown_and_custom_emoji() {
+        // An announcement-shaped message that exercises the new rules
+        // alongside the existing ones.
+        let raw = "@everyone\n**⏰ RDV**: 20h *sur place*\n📏 Distance : 25km ;\n<:mayo:9999> let's ride";
+        let got = discord_to_caption(raw, &HashMap::new());
+        assert!(!got.contains("@everyone"));
+        assert!(!got.contains("**"));
+        assert!(!got.contains("<:mayo:"));
+        assert!(got.contains(":mayo:"));
+        assert!(got.contains("⏰ RDV"));
+        assert!(got.contains("sur place"));
     }
 }

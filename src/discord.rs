@@ -17,6 +17,56 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub mentions: Vec<User>,
+    #[serde(default)]
+    pub embeds: Vec<Embed>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Embed {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub fields: Vec<EmbedField>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmbedField {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub inline: bool,
+}
+
+impl Message {
+    /// The text body to work with: `content` if non-empty, otherwise a
+    /// string synthesized from the first embed (title + description +
+    /// fields as `Name : Value` lines). Returns empty when the message
+    /// has neither content nor a usable embed.
+    pub fn synthesized_body(&self) -> String {
+        if !self.content.is_empty() {
+            return self.content.clone();
+        }
+        let Some(e) = self.embeds.first() else {
+            return String::new();
+        };
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(t) = &e.title {
+            if !t.is_empty() {
+                parts.push(t.clone());
+            }
+        }
+        if let Some(d) = &e.description {
+            if !d.is_empty() {
+                parts.push(d.clone());
+            }
+        }
+        for f in &e.fields {
+            parts.push(format!("{} : {}", f.name, f.value));
+        }
+        parts.join("\n\n")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -243,5 +293,37 @@ mod tests {
     #[test]
     fn percent_encode_preserves_unreserved() {
         assert_eq!(percent_encode("abcXYZ-_.~0189"), "abcXYZ-_.~0189");
+    }
+
+    #[test]
+    fn synthesized_body_prefers_content() {
+        let raw = r#"{"id":"1","content":"hello","timestamp":"2026-01-01T00:00:00+00:00","author":{"id":"2","username":"u","global_name":null}}"#;
+        let m: Message = serde_json::from_str(raw).unwrap();
+        assert_eq!(m.synthesized_body(), "hello");
+    }
+
+    #[test]
+    fn synthesized_body_falls_back_to_embed() {
+        let raw = r#"{
+            "id":"1","content":"","timestamp":"2026-01-01T00:00:00+00:00",
+            "author":{"id":"2","username":"u","global_name":null},
+            "embeds":[{"title":"Ride","description":"Long desc","fields":[
+                {"name":"Distance","value":"20km","inline":true},
+                {"name":"D+","value":"170m","inline":true}
+            ]}]
+        }"#;
+        let m: Message = serde_json::from_str(raw).unwrap();
+        let body = m.synthesized_body();
+        assert!(body.contains("Ride"));
+        assert!(body.contains("Long desc"));
+        assert!(body.contains("Distance : 20km"));
+        assert!(body.contains("D+ : 170m"));
+    }
+
+    #[test]
+    fn synthesized_body_empty_on_empty_everything() {
+        let raw = r#"{"id":"1","content":"","timestamp":"2026-01-01T00:00:00+00:00","author":{"id":"2","username":"u","global_name":null}}"#;
+        let m: Message = serde_json::from_str(raw).unwrap();
+        assert_eq!(m.synthesized_body(), "");
     }
 }

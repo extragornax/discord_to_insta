@@ -26,7 +26,15 @@ Derived from a worked example (a Mayo Jaune cycling-ride announcement). These ru
 | `<#CHANNEL_ID>` | `voir Discord (lien en bio)` *(generic — treat all channel links the same way unless a future case contradicts this)* |
 | Discord's relative-time suffix (`1d`, `2h`, `5m`, …) | *(removed)* |
 | Trailing `Réactions :` block (from the literal line `Réactions :` to end of message) | *(removed)* |
+| `<:name:id>` / `<a:name:id>` (custom Discord emojis) | `:name:` |
+| `**bold**`, `*italic*`, `__underline__`, `~~strike~~`, `||spoiler||`, `` `code` ``, ``` ```fenced``` ``` | inner text preserved, delimiters dropped |
+| Line-start `# / ## / ### / -# / > / >>>` (headings, subtext, blockquotes) | prefix stripped, line content preserved |
+| `<https://…>` (bracketed URLs, Discord's no-embed syntax) | unwrapped |
 | Everything else (body text, line breaks, emojis, typographic apostrophes) | Preserved verbatim |
+
+**Intentional non-rules:**
+- Single-underscore italic `_foo_` is NOT stripped — it breaks `snake_case` file names and other literal underscores with no Discord-side benefit.
+- Embed-only messages (empty `content`, data in `embeds[]`) are handled at the list-rendering stage, not in `discord_to_caption`. See `Message::synthesized_body()` in `src/discord.rs`.
 
 Images attached to the Instagram post are **supplied by the user per post**, not extracted from the Discord message. The UI must accept an ordered image list (Instagram carousel order) alongside the captured announcement.
 

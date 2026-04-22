@@ -379,7 +379,11 @@ fn render_message_list(messages: &[Message]) -> String {
     for msg in messages {
         let mention_ids: Vec<&str> = msg.mentions.iter().map(|m| m.id.as_str()).collect();
         let mentions_json = serde_json::to_string(&mention_ids).unwrap_or_else(|_| "[]".into());
-        let first_line = msg.content.lines().next().unwrap_or("").trim();
+        // Use the synthesized body (falling back to embed fields when the
+        // plain `content` is empty) so rich-embed announcements are visible
+        // in the list and load real text into the textarea on click.
+        let body = msg.synthesized_body();
+        let first_line = body.lines().next().unwrap_or("").trim();
         let preview: String = if first_line.chars().count() > 160 {
             first_line.chars().take(160).collect::<String>() + "…"
         } else {
@@ -392,7 +396,7 @@ fn render_message_list(messages: &[Message]) -> String {
                 <div class="preview">{preview}</div>
             </div>"#,
             id = html_escape(&msg.id),
-            content = html_attr_escape(&msg.content),
+            content = html_attr_escape(&body),
             mentions = html_attr_escape(&mentions_json),
             date = html_escape(date),
             author = html_escape(msg.author.display()),
