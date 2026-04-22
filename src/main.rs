@@ -54,6 +54,9 @@ struct AppCtx {
     poller: Arc<Mutex<Option<PollerHandle>>>,
     last_seen_id: Arc<Mutex<Option<String>>>,
     gateway_connected: Arc<AtomicBool>,
+    /// Fired by the gateway on MESSAGE_CREATE for the target channel so the
+    /// poller can react within seconds instead of waiting out its 30 s timer.
+    poll_trigger: Arc<tokio::sync::Notify>,
 }
 
 #[tokio::main]
@@ -89,16 +92,20 @@ async fn main() {
         poller: Arc::new(Mutex::new(None)),
         last_seen_id: Arc::new(Mutex::new(last_seen)),
         gateway_connected: Arc::new(AtomicBool::new(false)),
+        poll_trigger: Arc::new(tokio::sync::Notify::new()),
     };
 
-    // Gateway task: holds a WebSocket to Discord so the bot shows as online.
-    // Survives the whole process lifetime — there's no UI toggle for it.
+    // Gateway task: holds a WebSocket to Discord so the bot shows as online,
+    // and fires ctx.poll_trigger on every MESSAGE_CREATE in our channel so
+    // the poller can react within seconds instead of waiting out its timer.
     if !config.token.is_empty() {
         let gw_ctx = gateway::GatewayCtx {
             token: config.token.clone(),
+            channel_id: config.channel_id.clone(),
             stop_flag: Arc::new(AtomicBool::new(false)), // lives for the process
             log: ctx.poller_log.clone(),
             connected: ctx.gateway_connected.clone(),
+            poll_trigger: ctx.poll_trigger.clone(),
         };
         tokio::spawn(gateway::run(gw_ctx));
     }
@@ -426,14 +433,23 @@ async fn run_poller(ctx: AppCtx, stop_flag: Arc<AtomicBool>) {
             }
         }
 
-        // Interruptible sleep.
+        // Wait up to POLL_INTERVAL, but cut short if the gateway spotted a
+        // MESSAGE_CREATE in our channel (fast path) or if we're asked to stop.
         let mut slept = Duration::ZERO;
         while slept < POLL_INTERVAL {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            slept += Duration::from_millis(200);
+            let step = Duration::from_millis(200);
+            tokio::select! {
+                _ = tokio::time::sleep(step) => {
+                    slept += step;
+                }
+                _ = ctx.poll_trigger.notified() => {
+                    push_log(&ctx.poller_log, "gateway trigger: fetching early").await;
+                    break;
+                }
+            }
         }
     }
 }

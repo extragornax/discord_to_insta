@@ -21,14 +21,25 @@ const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const LOG_MAX_LINES: usize = 40;
 
+/// GUILD_MESSAGES (bit 9). Not privileged. Gives us MESSAGE_CREATE /
+/// MESSAGE_UPDATE / MESSAGE_DELETE dispatches — we only act on CREATE.
+/// We deliberately do NOT request MESSAGE_CONTENT (bit 15, privileged)
+/// since the `content` field isn't needed here: we only use the event
+/// to fire an early REST fetch.
+const IDENTIFY_INTENTS: u64 = 1 << 9;
+
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
 
 pub struct GatewayCtx {
     pub token: String,
+    pub channel_id: String,
     pub stop_flag: Arc<AtomicBool>,
     pub log: Arc<Mutex<VecDeque<String>>>,
     pub connected: Arc<AtomicBool>,
+    /// Poked on every MESSAGE_CREATE for `channel_id`. The poller awaits this
+    /// alongside its timer so new announcements get reacted to in seconds.
+    pub poll_trigger: Arc<tokio::sync::Notify>,
 }
 
 pub async fn run(ctx: GatewayCtx) {
@@ -109,12 +120,13 @@ async fn connect_once(ctx: &GatewayCtx) -> ConnectOutcome {
     };
     let heartbeat_interval = Duration::from_millis(hb_ms);
 
-    // IDENTIFY (op 2). intents: 0 — we just want presence, no event stream.
+    // IDENTIFY (op 2) with GUILD_MESSAGES so we get MESSAGE_CREATE events
+    // to drive the fast-path poll trigger.
     let identify = json!({
         "op": 2,
         "d": {
             "token": ctx.token,
-            "intents": 0,
+            "intents": IDENTIFY_INTENTS,
             "properties": {
                 "os": "linux",
                 "browser": "discord_to_insta",
@@ -179,11 +191,30 @@ async fn connect_once(ctx: &GatewayCtx) -> ConnectOutcome {
 
                 match v["op"].as_u64() {
                     Some(0) => {
-                        if v.get("t").and_then(|t| t.as_str()) == Some("READY") {
-                            let user = v["d"]["user"]["username"]
-                                .as_str()
-                                .unwrap_or("?");
-                            push(&ctx.log, &format!("gateway: READY as {user}")).await;
+                        let t = v.get("t").and_then(|t| t.as_str());
+                        match t {
+                            Some("READY") => {
+                                let user = v["d"]["user"]["username"]
+                                    .as_str()
+                                    .unwrap_or("?");
+                                push(&ctx.log, &format!("gateway: READY as {user}")).await;
+                            }
+                            Some("MESSAGE_CREATE") => {
+                                // Only care about our target channel. Fire the
+                                // trigger so the poller fetches immediately
+                                // instead of waiting up to 30 s.
+                                let ch = v["d"]["channel_id"].as_str().unwrap_or("");
+                                if ch == ctx.channel_id {
+                                    let id = v["d"]["id"].as_str().unwrap_or("?");
+                                    push(
+                                        &ctx.log,
+                                        &format!("gateway: new message {id} — triggering fetch"),
+                                    )
+                                    .await;
+                                    ctx.poll_trigger.notify_one();
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     Some(1) => {

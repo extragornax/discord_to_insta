@@ -72,7 +72,7 @@ Decimals round to the nearest integer (`19.7 km` → picks `_20.*`; `19.5 km` �
 
 ## Auto-react bot
 
-The poller **auto-starts on launch** when `DISCORD_BOT_TOKEN` is set — the service is meant to run unattended. You don't have to click anything; the UI checkbox just reflects current state and lets you turn it off if you need to. Every 30 s it fetches the 50 most recent channel messages and compares them against the last-reacted snowflake ID in `state.json`:
+The poller **auto-starts on launch** when `DISCORD_BOT_TOKEN` is set — the service is meant to run unattended. You don't have to click anything; the UI checkbox just reflects current state and lets you turn it off if you need to. New announcements are reacted to within seconds: the Gateway connection (kept open for presence) also listens for `MESSAGE_CREATE` events and nudges the poller immediately instead of waiting out its 30 s timer. The timer remains a fallback for when the gateway briefly drops. Every cycle, it fetches the 50 most recent channel messages and compares them against the last-reacted snowflake ID in `state.json`:
 
 - **First run for a channel:** silently record the newest message ID — no retroactive reactions.
 - **Subsequent runs:** react with ✅ 🚫 🤔 (in that order) to anything newer, oldest-first so a mid-batch crash resumes cleanly.

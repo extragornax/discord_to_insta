@@ -118,9 +118,11 @@ The project will need Discord bot credentials and Instagram Graph API credential
 - Ingestion is REST-only (`GET /channels/{id}/messages`) via `ureq`. No gateway, no tokio runtime — fetches run on a `std::thread` and stream results back through an `mpsc` channel so the egui event loop never blocks.
 - The bot needs `View Channel` + `Read Message History` on the announcement channel. For the auto-react poller, it additionally needs `Add Reactions`. No privileged intents required since we're not using the gateway.
 
-### Gateway (bot online presence)
+### Gateway (bot online presence + fast-path trigger)
 
-- `src/gateway.rs` holds a Discord Gateway v10 WebSocket open for the lifetime of the process so the bot appears **online** in Discord. No event subscriptions (`intents: 0`) — message ingestion still goes through the REST poller; the gateway is purely for presence.
+- `src/gateway.rs` holds a Discord Gateway v10 WebSocket open for the lifetime of the process so the bot appears **online** in Discord.
+- Subscribes to `GUILD_MESSAGES` (`IDENTIFY_INTENTS = 1 << 9`, not privileged) so `MESSAGE_CREATE` events arrive in real time. No `MESSAGE_CONTENT` intent — the event's channel_id + message id are enough to fire a trigger; we still fetch the body via REST.
+- On `MESSAGE_CREATE` for `ctx.channel_id`, calls `ctx.poll_trigger.notify_one()`. The poller races that notification against its 30 s timer via `tokio::select!`, so reactions land within a few seconds of a new announcement. If the gateway drops, the timer is the safety net — reactions still happen within 30 s even without WebSocket events.
 - Hand-rolled minimal client (`tokio-tungstenite` + `futures-util`). Handles HELLO → IDENTIFY → heartbeat → reconnect with exponential backoff capped at 60 s.
 - Fatal close codes (4004 invalid token, 4010–4014 invalid shard/intents/api) stop the reconnect loop so a misconfigured deployment doesn't loop forever — the log shows `gateway: fatal, not reconnecting — …` and the status chip stays offline.
 - Status surfaces via `GET /api/gateway/status` (HTML badge, polled every 5 s by the topbar chip).

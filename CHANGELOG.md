@@ -61,3 +61,9 @@ All notable changes to this project are recorded here. Format loosely follows [K
 - `src/main.rs`: spawn `gateway::run` on startup alongside the poller when the token is set; new `AppCtx.gateway_connected: Arc<AtomicBool>` + `GET /api/gateway/status` endpoint returns an HTML badge (`online`/`offline`). — 2026-04-22
 - `src/index.html`: new `bot:` topbar chip that polls `/api/gateway/status` every 5 s. — 2026-04-22
 - Smoke-tested with a fake token: gateway connects to Discord, gets close-code 4004 on identify, logs `gateway: fatal, not reconnecting — closed: 4004 Authentication failed.` — exactly one attempt, no loop. With a real valid token the bot shows online in Discord. — 2026-04-22
+
+### Changed (gateway-triggered real-time reactions)
+- `src/gateway.rs`: IDENTIFY now requests `GUILD_MESSAGES` (`IDENTIFY_INTENTS = 1 << 9`, non-privileged) instead of `intents: 0`. The receive loop now handles `MESSAGE_CREATE`: on a match for `ctx.channel_id`, pushes a log line and calls `ctx.poll_trigger.notify_one()`. `MESSAGE_CONTENT` is deliberately NOT requested — it's privileged and unnecessary since we fetch bodies via REST. — 2026-04-22
+- `src/main.rs`: new `AppCtx.poll_trigger: Arc<tokio::sync::Notify>`, initialized in `main()`, passed to both the gateway spawn and the poller. The poller's inter-fetch sleep now uses `tokio::select!` so the 30 s timer races the trigger — reactions happen within a few seconds of a new announcement instead of waiting out the full cycle. The timer remains the safety net if the gateway briefly drops. — 2026-04-22
+- `CLAUDE.md`: documented the intent change and the trigger semantics. — 2026-04-22
+- Smoke-tested: build clean, 23/23 tests green, fake-token run still reports `gateway: fatal, not reconnecting — closed: 4004` exactly once. — 2026-04-22
