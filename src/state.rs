@@ -21,6 +21,12 @@ pub struct AppState {
     #[serde(default)]
     pub reactions_done_by_channel:
         HashMap<String, HashMap<String, BTreeSet<String>>>,
+
+    /// Discord user ID → Instagram handle (without leading `@`). Edited from
+    /// the Répertoire UI, consumed by the caption transform to rewrite
+    /// `<@id>` mentions. Absent IDs are just dropped from the caption.
+    #[serde(default)]
+    pub handles: HashMap<String, String>,
 }
 
 impl AppState {

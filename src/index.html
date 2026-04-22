@@ -769,15 +769,22 @@
       </div>
       <p class="repertoire-note">
         Les mentions absentes de ce répertoire sont simplement retirées de l’épreuve.
+        Les changements sont enregistrés automatiquement.
       </p>
-      <div id="handle-rows">
-        <div class="handle-row">
-          <input name="handle_id_0" placeholder="ID Discord" form="convert-form">
-          <input name="handle_user_0" placeholder="@handle" form="convert-form">
-          <button type="button" onclick="removeHandleRow(this)">✕</button>
+      <form id="handles-form"
+            hx-post="/api/handles"
+            hx-trigger="input changed delay:400ms from:find input, handles:save"
+            hx-swap="none">
+        <div id="handle-rows"
+             hx-get="/api/handles"
+             hx-trigger="load"
+             hx-swap="innerHTML">
+          <p class="muted" style="font-family: var(--display); font-style: italic; font-size: 13px;">
+            chargement du répertoire…
+          </p>
         </div>
-      </div>
-      <button type="button" class="add-row" onclick="addHandleRow()">+ ajouter une ligne</button>
+        <button type="button" class="add-row" onclick="addHandleRow()">+ ajouter une ligne</button>
+      </form>
     </section>
 
   </main>
@@ -833,23 +840,44 @@
       if (ta) ta.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
-    /* ── handle-row add / remove ──────────────────────────────────────── */
-    let handleRowCounter = 1;
+    /* ── handle-row add / remove ──────────────────────────────────────────
+     * The Répertoire is persisted server-side (/api/handles). On input,
+     * the form auto-posts the full map with a 400 ms debounce. Deletes
+     * don't fire `input`, so removeHandleRow() dispatches a synthetic
+     * `handles:save` event that the form also listens for.
+     */
+    function nextHandleIndex() {
+      const existing = document.querySelectorAll('#handle-rows input[name^="handle_id_"]');
+      let maxN = -1;
+      existing.forEach(i => {
+        const m = i.name.match(/handle_id_(\d+)/);
+        if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+      });
+      return maxN + 1;
+    }
     function removeHandleRow(btn) {
       btn.parentElement.remove();
+      // Tell the form to re-post without this row, then refresh the preview.
+      const form = document.getElementById('handles-form');
+      if (form) htmx.trigger(form, 'handles:save');
       refreshPreview();
     }
     function addHandleRow() {
       const container = document.getElementById('handle-rows');
       const row = document.createElement('div');
       row.className = 'handle-row';
+      const n = nextHandleIndex();
       row.innerHTML =
-        '<input name="handle_id_' + handleRowCounter + '" placeholder="ID Discord" form="convert-form">' +
-        '<input name="handle_user_' + handleRowCounter + '" placeholder="@handle" form="convert-form">' +
+        '<input name="handle_id_' + n + '" placeholder="ID Discord">' +
+        '<input name="handle_user_' + n + '" placeholder="@handle">' +
         '<button type="button" onclick="removeHandleRow(this)">✕</button>';
       container.appendChild(row);
-      handleRowCounter++;
+      // Focus the new row's ID input so the operator can start typing.
+      const first = row.querySelector('input');
+      if (first) first.focus();
     }
+    // Any input change in the Répertoire should also refresh the preview,
+    // since the preview now reads handles from the server-side store.
     document.getElementById('handle-rows').addEventListener('input', refreshPreview);
 
     /* ── clicking a dépêche loads it into the source textarea ────────── */

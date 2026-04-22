@@ -34,6 +34,15 @@ const REACTION_EMOJIS: &[&str] = &["✅", "🚫", "🤔"];
 const LOG_MAX_LINES: usize = 40;
 const INDEX_HTML: &str = include_str!("index.html");
 
+/// Seeded on first launch if `AppState.handles` is empty. The user can edit
+/// / remove any of these from the Répertoire panel; they're not re-added
+/// unless the map is completely emptied again.
+const DEFAULT_HANDLES: &[(&str, &str)] = &[
+    ("699543821465419806", "bertrandbernager"),
+    ("222353499638202369", "extragornax"),
+    ("198518357236908033", "mithiriath"),
+];
+
 struct Config {
     token: String,
     channel_id: String,
@@ -57,6 +66,11 @@ struct AppCtx {
     /// Fired by the gateway on MESSAGE_CREATE for the target channel so the
     /// poller can react within seconds instead of waiting out its 30 s timer.
     poll_trigger: Arc<tokio::sync::Notify>,
+    /// Held for the duration of any load-mutate-save cycle on state.json.
+    /// The UI's handle-editor and the poller's reaction-writer both touch
+    /// the same file; this serializes them so one side's changes can't
+    /// stomp the other's between its read and its write.
+    state_write_lock: Arc<Mutex<()>>,
 }
 
 #[tokio::main]
@@ -78,7 +92,24 @@ async fn main() {
         eprintln!("warning: DISCORD_BOT_TOKEN is empty — fetch and auto-react will fail until set");
     }
 
-    let state_data = AppState::load(&config.state_path);
+    let mut state_data = AppState::load(&config.state_path);
+
+    // Seed the default handle map the first time we run against a fresh state
+    // file. Operator edits (including deletions) are preserved — the seed
+    // only runs when the whole map is empty.
+    if state_data.handles.is_empty() {
+        for (id, handle) in DEFAULT_HANDLES {
+            state_data
+                .handles
+                .insert((*id).to_string(), (*handle).to_string());
+        }
+        if let Err(e) = state_data.save(&config.state_path) {
+            eprintln!("warning: couldn't write seed handles to state: {e}");
+        } else {
+            println!("seeded {} default Instagram handles", DEFAULT_HANDLES.len());
+        }
+    }
+
     let last_seen = state_data
         .last_reacted_by_channel
         .get(&config.channel_id)
@@ -93,6 +124,7 @@ async fn main() {
         last_seen_id: Arc::new(Mutex::new(last_seen)),
         gateway_connected: Arc::new(AtomicBool::new(false)),
         poll_trigger: Arc::new(tokio::sync::Notify::new()),
+        state_write_lock: Arc::new(Mutex::new(())),
     };
 
     // Gateway task: holds a WebSocket to Discord so the bot shows as online,
@@ -122,6 +154,7 @@ async fn main() {
         .route("/api/config", get(api_config))
         .route("/api/fetch", post(api_fetch))
         .route("/api/preview", post(api_preview))
+        .route("/api/handles", get(api_handles_get).post(api_handles_post))
         .route("/api/poller/toggle", post(api_poller_toggle))
         .route("/api/poller/status", get(api_poller_status))
         .route("/api/poller/running", get(api_poller_running))
@@ -182,7 +215,9 @@ async fn api_preview(
     Form(form): Form<HashMap<String, String>>,
 ) -> Html<String> {
     let raw = form.get("raw").cloned().unwrap_or_default();
-    let user_map = collect_user_map(&form);
+    // Handles come from the persistent store now — the Répertoire panel edits
+    // them via /api/handles, not via the preview form.
+    let user_map = AppState::load(&ctx.config.state_path).handles;
     let caption = discord_to_caption(&raw, &user_map);
     let distance_km = images::parse_distance_km(&raw);
     let image_path = distance_km
@@ -260,6 +295,56 @@ async fn api_gateway_status(State(ctx): State<AppCtx>) -> Html<&'static str> {
     } else {
         Html(r#"<span class="badge muted">offline</span>"#)
     }
+}
+
+async fn api_handles_get(State(ctx): State<AppCtx>) -> Html<String> {
+    let state = AppState::load(&ctx.config.state_path);
+    Html(render_handle_rows(&state.handles))
+}
+
+async fn api_handles_post(
+    State(ctx): State<AppCtx>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Html<&'static str> {
+    let new_handles = collect_user_map(&form);
+    // Serialize the read-modify-write against the poller's own writer.
+    let _guard = ctx.state_write_lock.lock().await;
+    let mut state = AppState::load(&ctx.config.state_path);
+    state.handles = new_handles;
+    if let Err(e) = state.save(&ctx.config.state_path) {
+        eprintln!("handles save failed: {e}");
+    }
+    // hx-swap="none" on the client — body is ignored.
+    Html("ok")
+}
+
+fn render_handle_rows(handles: &HashMap<String, String>) -> String {
+    let mut pairs: Vec<(&String, &String)> = handles.iter().collect();
+    // Stable order: handle alphabetically, then ID.
+    pairs.sort_by(|a, b| a.1.cmp(b.1).then_with(|| a.0.cmp(b.0)));
+    let mut buf = String::new();
+    for (i, (id, handle)) in pairs.iter().enumerate() {
+        buf.push_str(&format!(
+            r#"<div class="handle-row">
+                <input name="handle_id_{i}" value="{id}" placeholder="ID Discord">
+                <input name="handle_user_{i}" value="{handle}" placeholder="@handle">
+                <button type="button" onclick="removeHandleRow(this)">✕</button>
+            </div>"#,
+            i = i,
+            id = html_escape(id),
+            handle = html_escape(handle),
+        ));
+    }
+    if buf.is_empty() {
+        buf.push_str(
+            r#"<div class="handle-row">
+                <input name="handle_id_0" placeholder="ID Discord">
+                <input name="handle_user_0" placeholder="@handle">
+                <button type="button" onclick="removeHandleRow(this)">✕</button>
+            </div>"#,
+        );
+    }
+    buf
 }
 
 async fn api_poller_log(State(ctx): State<AppCtx>) -> Html<String> {
@@ -455,6 +540,9 @@ async fn run_poller(ctx: AppCtx, stop_flag: Arc<AtomicBool>) {
 }
 
 async fn handle_batch(ctx: &AppCtx, messages: Vec<Message>) -> std::io::Result<()> {
+    // Serialize with the Répertoire's writer so handles edited mid-poll
+    // don't get clobbered by a concurrent poller save.
+    let _guard = ctx.state_write_lock.lock().await;
     let mut persisted = AppState::load(&ctx.config.state_path);
     let last_seen = persisted
         .last_reacted_by_channel
