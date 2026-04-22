@@ -111,9 +111,12 @@ async fn main() {
             _ => state::default_path(),
         },
         telegram_token: std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
+        // Forgiving parse — operators sometimes copy chat IDs with a
+        // decorative leading `#` from chat clients. Telegram's own format
+        // is a plain signed i64 (negative for groups/supergroups).
         telegram_chat_id: std::env::var("TELEGRAM_APPROVAL_CHAT_ID")
             .ok()
-            .and_then(|s| s.trim().parse::<i64>().ok()),
+            .and_then(|s| s.trim().trim_start_matches('#').parse::<i64>().ok()),
     });
 
     if config.token.is_empty() {
@@ -353,9 +356,25 @@ async fn api_gateway_status(State(ctx): State<AppCtx>) -> Html<&'static str> {
 
 async fn api_telegram_status(State(ctx): State<AppCtx>) -> Html<&'static str> {
     if ctx.telegram.is_some() {
-        Html(r#"<span class="badge ok">prêt</span>"#)
-    } else {
-        Html(r#"<span class="badge muted">non-configuré</span>"#)
+        return Html(r#"<span class="badge ok">prêt</span>"#);
+    }
+    // Narrow down the reason so the operator can fix the right .env entry
+    // without shelling into the container for the startup log.
+    let has_token = !ctx.config.telegram_token.is_empty();
+    let has_chat = ctx.config.telegram_chat_id.is_some();
+    match (has_token, has_chat) {
+        (false, false) => Html(
+            r#"<span class="badge muted" title="Définissez TELEGRAM_BOT_TOKEN et TELEGRAM_APPROVAL_CHAT_ID dans .env, puis redémarrez.">non-configuré</span>"#,
+        ),
+        (true, false) => Html(
+            r#"<span class="badge warn" title="TELEGRAM_APPROVAL_CHAT_ID absent ou non-entier. Attendu: un i64 sans préfixe (négatif pour un groupe, ex. -1003836652906 — pas de `#`, pas de guillemets).">TELEGRAM_APPROVAL_CHAT_ID manquant / invalide</span>"#,
+        ),
+        (false, true) => Html(
+            r#"<span class="badge warn" title="TELEGRAM_BOT_TOKEN absent. Récupérez-le chez @BotFather.">TELEGRAM_BOT_TOKEN manquant</span>"#,
+        ),
+        (true, true) => Html(
+            r#"<span class="badge warn" title="Les deux variables sont présentes mais Config::telegram_enabled() renvoie false — bug interne.">état incohérent</span>"#,
+        ),
     }
 }
 
