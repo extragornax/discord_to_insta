@@ -783,10 +783,7 @@
         Les mentions absentes de ce répertoire sont simplement retirées de l’épreuve.
         Les changements sont enregistrés automatiquement.
       </p>
-      <form id="handles-form"
-            hx-post="/api/handles"
-            hx-trigger="input changed delay:400ms from:find input, handles:save"
-            hx-swap="none">
+      <form id="handles-form" onsubmit="return false">
         <div id="handle-rows"
              hx-get="/api/handles"
              hx-trigger="load"
@@ -852,11 +849,13 @@
       if (ta) ta.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
-    /* ── handle-row add / remove ──────────────────────────────────────────
-     * The Répertoire is persisted server-side (/api/handles). On input,
-     * the form auto-posts the full map with a 400 ms debounce. Deletes
-     * don't fire `input`, so removeHandleRow() dispatches a synthetic
-     * `handles:save` event that the form also listens for.
+    /* ── handle-row add / remove / save ───────────────────────────────────
+     * The Répertoire is persisted server-side at /api/handles. We drive
+     * saves from plain JS (debounced 400 ms) rather than an htmx form
+     * trigger — htmx's `changed` + `from:find input` modifiers were unreliable
+     * against inputs that get added dynamically (either by the hx-get load
+     * or by the add-row button), so an explicit htmx.ajax call is simpler
+     * and easier to debug.
      */
     function nextHandleIndex() {
       const existing = document.querySelectorAll('#handle-rows input[name^="handle_id_"]');
@@ -867,11 +866,24 @@
       });
       return maxN + 1;
     }
+
+    let handleSaveTimer = null;
+    function saveHandlesNow() {
+      clearTimeout(handleSaveTimer);
+      handleSaveTimer = null;
+      htmx.ajax('POST', '/api/handles', {
+        source: '#handles-form',
+        swap: 'none'
+      });
+    }
+    function scheduleHandleSave() {
+      clearTimeout(handleSaveTimer);
+      handleSaveTimer = setTimeout(saveHandlesNow, 400);
+    }
+
     function removeHandleRow(btn) {
       btn.parentElement.remove();
-      // Tell the form to re-post without this row, then refresh the preview.
-      const form = document.getElementById('handles-form');
-      if (form) htmx.trigger(form, 'handles:save');
+      saveHandlesNow();   // immediate — user won't type again
       refreshPreview();
     }
     function addHandleRow() {
@@ -887,10 +899,15 @@
       // Focus the new row's ID input so the operator can start typing.
       const first = row.querySelector('input');
       if (first) first.focus();
+      // Blank rows aren't persisted server-side (both fields required),
+      // so we wait for the user to actually type before scheduling a save.
     }
-    // Any input change in the Répertoire should also refresh the preview,
-    // since the preview now reads handles from the server-side store.
-    document.getElementById('handle-rows').addEventListener('input', refreshPreview);
+
+    // Any typing inside the Répertoire: debounced save + live preview refresh.
+    document.getElementById('handle-rows').addEventListener('input', () => {
+      scheduleHandleSave();
+      refreshPreview();
+    });
 
     /* ── clicking a dépêche loads it into the source textarea ────────── */
     document.addEventListener('click', e => {
