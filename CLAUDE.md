@@ -103,6 +103,15 @@ The project will need Discord bot credentials and Instagram Graph API credential
   - `DISCORD_TO_INSTA_IMAGES_DIR` (optional) — overrides the default `images/` path. Useful when running in a container with a volume mount.
   - `DISCORD_TO_INSTA_STATE_PATH` (optional) — overrides the default XDG state-file path.
   - `PORT` (optional) — HTTP listen port, default 8080.
+
+## Docker
+
+- `Dockerfile` is a two-stage build on `rust:1.92-slim-bookworm` → `debian:bookworm-slim`. A dummy-src layer primes the dep cache so `COPY src` only rebuilds the final binary (real app layer recompiles in ~7 s locally).
+- `docker-compose.yml` publishes **`9010:8080`** — the external port is 9010, the container listens on 8080. The external port is a user-facing contract; change it in one place.
+- `images/` is bind-mounted read-only from the host. The `state` named volume persists `/app/state/state.json` across restarts.
+- `.env` is loaded via `env_file: { path: .env, required: false }` so it's optional.
+- The container runs as a non-root user (`app`, uid 10001).
+- Build: `docker compose build`. Run: `docker compose up -d`. Logs: `docker compose logs -f`.
 - `.env` loading: `dotenvy::dotenv()` runs once at `main()` start. Missing `.env` is not an error (vars may come from docker-compose `env_file:` or the ambient environment). Ambient env wins over `.env`.
 - Template lives at `.env.example`; `.env` is gitignored.
 - Target channel defaults to `981806074233507880` (Mayo Jaune announcements, guild `981525647891525642`). It's only a UI default — the field is editable. Update `DEFAULT_CHANNEL_ID` in `src/main.rs` if the canonical channel ever changes.

@@ -1,0 +1,17 @@
+services:
+  discord_to_insta:
+    build: .
+    image: discord_to_insta:local
+    container_name: discord_to_insta
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "9010:8080"
+    volumes:
+      - ./images:/app/images:ro
+      - state:/app/state
+
+volumes:
+  state:

@@ -1,0 +1,7 @@
+/target
+/images
+.git
+.env
+*.md
+Dockerfile
+docker-compose.yml
