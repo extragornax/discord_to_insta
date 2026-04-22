@@ -58,40 +58,41 @@
     /* ──────────────────────────────────────────────────────────────── masthead */
     .masthead {
       position: relative;
-      padding: 28px 42px 18px;
-      border-bottom: 3px solid var(--ink);
+      padding: 10px 24px 8px;
+      border-bottom: 2px solid var(--ink);
       background: var(--paper);
       animation: paperIn 520ms ease-out both;
     }
     .masthead::after {
       content: "";
-      position: absolute; left: 42px; right: 42px; bottom: -8px; height: 1px;
+      position: absolute; left: 24px; right: 24px; bottom: -5px; height: 1px;
       background: var(--ink);
     }
 
     .mast-rule {
       display: flex;
-      align-items: flex-end;
+      align-items: center;
       justify-content: space-between;
-      gap: 24px;
-      padding-bottom: 6px;
+      gap: 18px;
+      padding-bottom: 5px;
       border-bottom: 1px solid var(--ink);
       font-family: var(--narrow);
-      font-size: 11px;
-      letter-spacing: 0.14em;
+      font-size: 10.5px;
+      letter-spacing: 0.12em;
       text-transform: uppercase;
       color: var(--ink-soft);
+      flex-wrap: wrap;
     }
     .mast-rule b { font-weight: 600; color: var(--ink); }
-    .mast-rule .edition-no { font-family: var(--display); font-style: italic; font-size: 14px; color: var(--ink); }
+    .mast-rule .edition-no { font-family: var(--display); font-style: italic; font-size: 13px; color: var(--ink); }
     .mast-rule .sep { color: var(--gray); }
 
     .mast-title {
-      margin: 16px 0 8px;
+      margin: 6px 0 4px;
       display: grid;
       grid-template-columns: 1fr auto;
-      gap: 24px;
-      align-items: end;
+      gap: 18px;
+      align-items: baseline;
     }
     .mast-title h1 {
       margin: 0;
@@ -100,8 +101,8 @@
       font-variation-settings: "opsz" 96;
       font-style: italic;
       letter-spacing: -0.02em;
-      font-size: clamp(54px, 7.4vw, 104px);
-      line-height: 0.88;
+      font-size: clamp(26px, 3.4vw, 44px);
+      line-height: 1;
       color: var(--ink);
     }
     .mast-title h1 .amp {
@@ -114,30 +115,31 @@
       font-family: var(--display);
       font-style: italic;
       font-weight: 400;
-      font-size: 18px;
+      font-size: 12.5px;
       color: var(--ink-soft);
-      max-width: 36ch;
+      max-width: 48ch;
       text-align: right;
-      line-height: 1.3;
+      line-height: 1.25;
+      margin: 0;
     }
     .mast-subtitle strong { color: var(--ink); font-weight: 600; font-style: normal; letter-spacing: 0.02em; }
 
     .mast-strip {
-      margin-top: 18px;
-      padding-top: 14px;
+      margin-top: 6px;
+      padding-top: 6px;
       border-top: 1px solid var(--ink);
       display: flex;
       align-items: center;
-      gap: 18px;
+      gap: 10px;
       flex-wrap: wrap;
       font-family: var(--narrow);
       text-transform: uppercase;
-      letter-spacing: 0.12em;
-      font-size: 11.5px;
+      letter-spacing: 0.1em;
+      font-size: 10.5px;
       color: var(--ink-soft);
     }
     .mast-strip .strip-sep {
-      width: 1px; height: 16px; background: var(--rule-strong);
+      width: 1px; height: 12px; background: var(--rule-strong);
     }
     .mast-strip label {
       color: var(--ink-soft);
@@ -145,16 +147,20 @@
 
     /* Cue chip (channel / guild / IDs) */
     .cue {
-      display: inline-flex; align-items: baseline; gap: 6px;
+      display: inline-flex; align-items: baseline; gap: 4px;
       font-family: var(--mono);
       text-transform: none;
       letter-spacing: 0;
-      font-size: 11.5px;
+      font-size: 10.5px;
       color: var(--ink-2);
-      padding: 3px 8px;
+      padding: 2px 6px;
       background: var(--paper-warm);
       border: 1px solid var(--rule-strong);
       border-radius: 0;
+      max-width: 180px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     /* The big "dispatch" button — stamped, bold */
@@ -163,9 +169,9 @@
       font-family: var(--narrow);
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.18em;
-      font-size: 12px;
-      padding: 10px 18px 9px;
+      letter-spacing: 0.14em;
+      font-size: 11px;
+      padding: 6px 12px 5px;
       background: var(--ink);
       color: var(--paper);
       border: 0;
@@ -178,21 +184,21 @@
 
     /* Dossard-style toggle: a numbered bib-ish container for the checkbox + label */
     .bib {
-      display: inline-flex; align-items: center; gap: 10px;
-      padding: 6px 12px 6px 8px;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 9px 4px 6px;
       background: var(--jaune);
       border: 1.5px solid var(--ink);
       font-family: var(--narrow);
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.14em;
-      font-size: 11.5px;
+      letter-spacing: 0.1em;
+      font-size: 10.5px;
       color: var(--ink);
       cursor: pointer;
       user-select: none;
     }
     .bib input[type="checkbox"] {
-      width: 14px; height: 14px; margin: 0;
+      width: 12px; height: 12px; margin: 0;
       accent-color: var(--ink);
       cursor: pointer;
     }
@@ -210,15 +216,21 @@
     /* ──────────────────────────────────────────────────────────────── page */
     .page {
       display: grid;
-      grid-template-columns: 300px 1fr 280px 300px;
+      grid-template-columns: 230px 1fr 210px 230px;
+      grid-template-areas: "messages compose image handles";
       gap: 0;
       border-top: 1px solid var(--ink);
       border-bottom: 1px solid var(--ink);
-      min-height: calc(100vh - 340px);
+      min-height: calc(100vh - 180px);
       animation: paperIn 620ms ease-out 120ms both;
     }
+    #messages-panel { grid-area: messages; }
+    #convert-panel  { grid-area: compose; }
+    #image-panel    { grid-area: image; }
+    #handles-panel  { grid-area: handles; }
+
     .col {
-      padding: 22px 24px 28px;
+      padding: 12px 14px 18px;
       border-right: 1px solid var(--rule-strong);
       overflow: auto;
       position: relative;
@@ -231,16 +243,16 @@
       display: flex;
       align-items: baseline;
       justify-content: space-between;
-      gap: 16px;
-      padding-bottom: 12px;
-      margin-bottom: 16px;
+      gap: 10px;
+      padding-bottom: 6px;
+      margin-bottom: 10px;
       border-bottom: 2px solid var(--ink);
     }
     .col-head .section-no {
       font-family: var(--display);
       font-style: italic;
       font-weight: 400;
-      font-size: 22px;
+      font-size: 16px;
       color: var(--jaune-dark);
       line-height: 1;
     }
@@ -248,7 +260,7 @@
       font-family: var(--display);
       font-style: italic;
       font-weight: 500;
-      font-size: 22px;
+      font-size: 17px;
       line-height: 1.1;
       color: var(--ink);
       letter-spacing: -0.005em;
@@ -257,8 +269,8 @@
       font-family: var(--narrow);
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.2em;
-      font-size: 10px;
+      letter-spacing: 0.18em;
+      font-size: 9.5px;
       color: var(--ink-soft);
       margin-top: 2px;
     }
@@ -267,8 +279,8 @@
     #message-list .msg {
       position: relative;
       display: block;
-      padding: 14px 14px 14px 38px;
-      margin: 0 -8px;
+      padding: 10px 8px 10px 30px;
+      margin: 0 -6px;
       cursor: pointer;
       border-top: 1px solid transparent;
       border-bottom: 1px solid var(--rule);
@@ -278,9 +290,9 @@
       content: counter(msg-n, decimal-leading-zero);
       counter-increment: msg-n;
       position: absolute;
-      left: 8px; top: 17px;
+      left: 6px; top: 12px;
       font-family: var(--mono);
-      font-size: 10px;
+      font-size: 9.5px;
       color: var(--gray);
       letter-spacing: 0.04em;
     }
@@ -303,23 +315,23 @@
     #message-list .msg .meta {
       display: flex;
       justify-content: space-between;
-      gap: 10px;
+      gap: 6px;
       font-family: var(--narrow);
-      font-size: 10.5px;
-      letter-spacing: 0.1em;
+      font-size: 9.5px;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--ink-soft);
     }
     #message-list .msg .meta::after { content: "§"; color: var(--gray); margin-left: auto; }
     #message-list .msg .preview {
-      margin-top: 6px;
+      margin-top: 4px;
       font-family: var(--display);
       font-style: italic;
-      font-size: 15px;
-      line-height: 1.35;
+      font-size: 13px;
+      line-height: 1.3;
       color: var(--ink);
       display: -webkit-box;
-      -webkit-line-clamp: 3;
+      -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
@@ -328,13 +340,13 @@
     .compose-wrap {
       display: grid;
       grid-template-rows: auto 1fr;
-      gap: 14px;
+      gap: 10px;
       height: 100%;
     }
     .compose-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 22px;
+      gap: 14px;
       height: 100%;
     }
     .field label {
@@ -342,11 +354,12 @@
       font-family: var(--narrow);
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.2em;
-      font-size: 10px;
+      letter-spacing: 0.18em;
+      font-size: 9.5px;
       color: var(--ink-soft);
-      margin-bottom: 6px;
-      gap: 10px;
+      margin-bottom: 4px;
+      gap: 8px;
+      flex-wrap: wrap;
     }
     .field textarea,
     .field input {
@@ -354,11 +367,11 @@
       background: var(--paper-warm);
       color: var(--ink);
       border: 1px solid var(--rule-strong);
-      padding: 14px 16px;
+      padding: 10px 12px;
       border-radius: 0;
       font-family: var(--mono);
-      font-size: 12px;
-      line-height: 1.55;
+      font-size: 11.5px;
+      line-height: 1.5;
       resize: none;
       outline: none;
       transition: border-color 160ms ease, background 160ms ease;
@@ -370,17 +383,17 @@
     }
     .field textarea {
       height: 100%;
-      min-height: 360px;
+      min-height: 280px;
     }
     .field.caption textarea {
       font-family: var(--sans);
-      font-size: 13px;
-      line-height: 1.5;
+      font-size: 12.5px;
+      line-height: 1.45;
       color: var(--ink);
     }
     #char-counter {
       font-family: var(--mono);
-      font-size: 10px;
+      font-size: 9.5px;
       letter-spacing: 0;
       text-transform: none;
       color: var(--gray);
@@ -388,12 +401,13 @@
     #char-counter.over { color: var(--red); font-weight: 600; }
 
     .compose-actions {
-      display: flex; gap: 10px; align-items: center;
+      display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
     }
+    .compose-actions .press { padding: 4px 9px 3px; font-size: 10px; letter-spacing: 0.1em; }
 
     /* ──────────────────────────────────────────────────────────────── plaque (image preview) */
     .plaque {
-      padding: 14px;
+      padding: 10px;
       background: var(--paper-warm);
       border: 1px solid var(--ink);
       position: relative;
@@ -401,15 +415,15 @@
     .plaque::before {
       content: "La Plaque";
       position: absolute;
-      top: -10px; left: 12px;
-      padding: 0 8px;
+      top: -9px; left: 10px;
+      padding: 0 6px;
       background: var(--paper);
       font-family: var(--display);
       font-style: italic;
-      font-size: 13px;
+      font-size: 12px;
       color: var(--ink-soft);
     }
-    #image-preview { min-height: 340px; display: grid; gap: 10px; }
+    #image-preview { min-height: 240px; display: grid; gap: 6px; }
     #image-preview img {
       width: 100%;
       border: 1px solid var(--ink);
@@ -418,7 +432,7 @@
     }
     #image-preview p.muted {
       font-family: var(--mono);
-      font-size: 10.5px;
+      font-size: 9.5px;
       color: var(--ink-soft);
       margin: 0;
       word-break: break-all;
@@ -429,17 +443,18 @@
       font-family: var(--display);
       font-style: italic;
       color: var(--ink-soft);
-      font-size: 13px;
-      margin: 4px 0 18px;
+      font-size: 11.5px;
+      margin: 2px 0 10px;
       border-left: 2px solid var(--jaune);
-      padding-left: 10px;
+      padding-left: 8px;
+      line-height: 1.3;
     }
     .handle-row {
       display: grid;
       grid-template-columns: 1fr 1fr auto;
-      gap: 6px;
+      gap: 4px;
       align-items: center;
-      padding: 8px 0;
+      padding: 5px 0;
       border-bottom: 1px dotted var(--rule-strong);
     }
     .handle-row input {
@@ -447,9 +462,9 @@
       background: transparent;
       border: 0;
       border-bottom: 1px solid var(--rule-strong);
-      padding: 4px 0;
+      padding: 3px 0;
       font-family: var(--mono);
-      font-size: 11.5px;
+      font-size: 10.5px;
       color: var(--ink);
       outline: none;
       border-radius: 0;
@@ -539,46 +554,46 @@
       border-top: 1px solid var(--ink);
       background: repeating-linear-gradient(
         to bottom,
-        var(--paper) 0 30px,
-        var(--paper-warm) 30px 60px
+        var(--paper) 0 24px,
+        var(--paper-warm) 24px 48px
       );
-      padding: 14px 42px 18px;
+      padding: 8px 24px 12px;
       animation: paperIn 720ms ease-out 240ms both;
     }
     .telex-head {
-      display: flex; align-items: baseline; gap: 14px;
-      padding-bottom: 10px;
+      display: flex; align-items: baseline; gap: 10px;
+      padding-bottom: 5px;
       border-bottom: 1px solid var(--ink);
-      margin-bottom: 8px;
+      margin-bottom: 4px;
     }
     .telex-head .num {
       font-family: var(--display);
       font-style: italic;
-      font-size: 20px;
+      font-size: 15px;
       color: var(--jaune-dark);
     }
     .telex-head .title {
       font-family: var(--display);
       font-style: italic;
       font-weight: 500;
-      font-size: 20px;
+      font-size: 15px;
     }
     .telex-head .lbl {
       font-family: var(--narrow);
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.2em;
-      font-size: 10px;
+      letter-spacing: 0.18em;
+      font-size: 9.5px;
       color: var(--ink-soft);
       margin-left: auto;
     }
 
     #poller-log {
-      height: 140px;
+      height: 96px;
       overflow: auto;
       font-family: var(--mono);
-      font-size: 11.5px;
-      line-height: 1.6;
+      font-size: 10.5px;
+      line-height: 1.5;
       color: var(--ink-2);
     }
     #poller-log .line {
@@ -618,11 +633,41 @@
       opacity: 0.6;
     }
 
-    /* Responsive: collapse columns on narrow screens. */
-    @media (max-width: 1200px) {
-      .page { grid-template-columns: 1fr; }
+    /* Responsive: progressively fold columns. Rather than collapsing all
+       the way to 1-col at the first breakpoint, we step down — first
+       image moves under compose, then Répertoire joins messages in the
+       left rail, then everything stacks. */
+    @media (max-width: 1500px) {
+      .page {
+        grid-template-columns: 220px 1fr 220px;
+        grid-template-areas:
+          "messages compose handles"
+          "messages image   handles";
+      }
+      #image-panel { border-top: 1px solid var(--rule-strong); padding-top: 10px; }
+    }
+    @media (max-width: 1100px) {
+      .page {
+        grid-template-columns: 220px 1fr;
+        grid-template-areas:
+          "messages compose"
+          "handles  image";
+      }
+      #handles-panel { border-top: 1px solid var(--rule-strong); }
+    }
+    @media (max-width: 760px) {
+      .page {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "compose"
+          "messages"
+          "image"
+          "handles";
+      }
       .col { border-right: 0; border-bottom: 1px solid var(--rule-strong); }
       .compose-grid { grid-template-columns: 1fr; }
+      .masthead { padding: 8px 14px 6px; }
+      .telex { padding: 6px 14px 10px; }
     }
   </style>
 </head>
@@ -642,18 +687,6 @@
         pour les annonces de <strong>Mayo Jaune</strong>.
       </p>
     </div>
-
-    <svg class="wheel-ornament" viewBox="0 0 600 14" preserveAspectRatio="none" aria-hidden="true">
-      <line x1="0" y1="7" x2="600" y2="7" stroke="#141210" stroke-width="0.5"/>
-      <g fill="#141210">
-        <circle cx="6" cy="7" r="2"/>
-        <circle cx="594" cy="7" r="2"/>
-      </g>
-      <g stroke="#141210" stroke-width="0.6">
-        <path d="M20 7 L28 2 L36 7 L28 12 Z"/>
-        <path d="M564 7 L572 2 L580 7 L572 12 Z"/>
-      </g>
-    </svg>
 
     <div class="mast-strip">
       <label>Bot</label>
