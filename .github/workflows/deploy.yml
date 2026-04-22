@@ -1,0 +1,42 @@
+name: Deploy
+
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   SSH_HOST         — target hostname or IP
+#   SSH_USER         — remote user
+#   SSH_PRIVATE_KEY  — full private key (with BEGIN/END lines) matching an entry in the target's authorized_keys
+#   DEPLOY_PATH      — absolute path to the cloned repo on the target
+# Optional:
+#   SSH_PORT         — defaults to 22 when unset
+#
+# The target must already have: the repo cloned at DEPLOY_PATH with the
+# deploy branch checked out, docker + docker compose installed, and a
+# populated .env alongside docker-compose.yml (or env vars injected some
+# other way).
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH, pull, rebuild
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_PATH }}"
+            git pull --ff-only
+            docker compose up -d --build
+            docker image prune -f

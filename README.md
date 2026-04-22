@@ -96,6 +96,30 @@ The current rules handle the Mayo Jaune template cleanly. Cases that **are not y
 
 Open an issue or extend `src/transform.rs` if any of these bite.
 
+## Deployment
+
+A GitHub Actions workflow in [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) SSHes into a target host, runs `git pull --ff-only`, then `docker compose up -d --build`. It triggers on pushes to `master` / `main` and can also be run manually from the Actions tab.
+
+One-time server setup:
+
+1. Clone the repo to the path you'll use as `DEPLOY_PATH`.
+2. Check out the deploy branch (`master` or `main`).
+3. Install docker + docker compose plugin.
+4. Create `.env` next to `docker-compose.yml` with at least `DISCORD_BOT_TOKEN`.
+5. Ensure the deploy user can `docker compose` without sudo.
+
+Repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Required | Notes |
+|---|---|---|
+| `SSH_HOST` | yes | Hostname or IP. |
+| `SSH_USER` | yes | Remote user with write access to `DEPLOY_PATH` and permission to run `docker compose`. |
+| `SSH_PRIVATE_KEY` | yes | Full private key including the `-----BEGIN/END-----` lines. Matching public key must be in the target's `authorized_keys`. |
+| `DEPLOY_PATH` | yes | Absolute path to the cloned repo on the target. |
+| `SSH_PORT` | no | Defaults to `22`. |
+
+The workflow is `concurrency: deploy` — two pushes won't deploy in parallel. It also runs `docker image prune -f` after the rebuild to avoid disk bloat from accumulated old image layers.
+
 ## Development
 
 ```bash
