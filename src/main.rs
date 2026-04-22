@@ -1,6 +1,7 @@
 mod discord;
 mod gateway;
 mod images;
+mod instagram;
 mod state;
 mod telegram;
 mod transform;
@@ -53,11 +54,21 @@ struct Config {
     state_path: PathBuf,
     telegram_token: String,
     telegram_chat_id: Option<i64>,
+    instagram_token: String,
+    instagram_user_id: String,
+    /// Publicly-reachable base URL where this service's `/images/*` path
+    /// can be fetched by Meta's servers. Required for publishing.
+    public_base_url: String,
 }
 
 impl Config {
     fn telegram_enabled(&self) -> bool {
         !self.telegram_token.is_empty() && self.telegram_chat_id.is_some()
+    }
+    fn instagram_enabled(&self) -> bool {
+        !self.instagram_token.is_empty()
+            && !self.instagram_user_id.is_empty()
+            && !self.public_base_url.is_empty()
     }
 }
 
@@ -93,6 +104,10 @@ struct AppCtx {
     /// endpoint push edited-message IDs onto. Absent when Telegram isn't
     /// configured (nothing would consume them).
     edit_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Instagram client (Graph API). Absent when Instagram isn't fully
+    /// configured — publish/edit becomes a logged no-op, Telegram approval
+    /// still runs so operators can test the approval UX.
+    instagram: Option<Arc<instagram::Client>>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +158,13 @@ async fn main() {
         telegram_chat_id: std::env::var("TELEGRAM_APPROVAL_CHAT_ID")
             .ok()
             .and_then(|s| s.trim().trim_start_matches('#').parse::<i64>().ok()),
+        instagram_token: std::env::var("INSTAGRAM_ACCESS_TOKEN").unwrap_or_default(),
+        instagram_user_id: std::env::var("INSTAGRAM_BUSINESS_ACCOUNT_ID").unwrap_or_default(),
+        // Drop a trailing slash so URLs concatenate cleanly with `/images/*`.
+        public_base_url: std::env::var("PUBLIC_BASE_URL")
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string(),
     });
 
     if config.token.is_empty() {
@@ -197,6 +219,28 @@ async fn main() {
         (None, None)
     };
 
+    let instagram = if config.instagram_enabled() {
+        Some(Arc::new(instagram::Client::new(
+            config.instagram_token.clone(),
+            config.instagram_user_id.clone(),
+        )))
+    } else {
+        let anything_set = !config.instagram_token.is_empty()
+            || !config.instagram_user_id.is_empty()
+            || !config.public_base_url.is_empty();
+        if anything_set {
+            eprintln!(
+                "warning: Instagram partially configured (token={} user_id={} base_url={}); publishing disabled",
+                !config.instagram_token.is_empty(),
+                !config.instagram_user_id.is_empty(),
+                !config.public_base_url.is_empty(),
+            );
+        } else {
+            println!("Instagram not configured — publishing/editing will be logged, not pushed");
+        }
+        None
+    };
+
     let ctx = AppCtx {
         config: config.clone(),
         client,
@@ -209,6 +253,7 @@ async fn main() {
         telegram: telegram.clone(),
         pending_approvals: Arc::new(Mutex::new(HashMap::new())),
         edit_tx: edit_tx.clone(),
+        instagram: instagram.clone(),
     };
 
     // Telegram updates loop: long-polls getUpdates and routes callback_query
@@ -263,6 +308,7 @@ async fn main() {
         .route("/api/telegram/status", get(api_telegram_status))
         .route("/api/telegram/request", post(api_telegram_request))
         .route("/api/telegram/request_edit", post(api_telegram_request_edit))
+        .route("/api/instagram/status", get(api_instagram_status))
         .nest_service("/images", ServeDir::new(config.images_dir.clone()))
         .with_state(ctx);
 
@@ -397,6 +443,32 @@ async fn api_gateway_status(State(ctx): State<AppCtx>) -> Html<&'static str> {
         Html(r#"<span class="badge ok">online</span>"#)
     } else {
         Html(r#"<span class="badge muted">offline</span>"#)
+    }
+}
+
+async fn api_instagram_status(State(ctx): State<AppCtx>) -> Html<&'static str> {
+    if ctx.instagram.is_some() {
+        return Html(r#"<span class="badge ok">prêt</span>"#);
+    }
+    let has_token = !ctx.config.instagram_token.is_empty();
+    let has_user = !ctx.config.instagram_user_id.is_empty();
+    let has_url = !ctx.config.public_base_url.is_empty();
+    match (has_token, has_user, has_url) {
+        (false, false, false) => Html(
+            r#"<span class="badge muted" title="Définissez INSTAGRAM_ACCESS_TOKEN, INSTAGRAM_BUSINESS_ACCOUNT_ID et PUBLIC_BASE_URL dans .env.">non-configuré</span>"#,
+        ),
+        (false, _, _) => Html(
+            r#"<span class="badge warn" title="INSTAGRAM_ACCESS_TOKEN manquant (token long-lived Graph API).">INSTAGRAM_ACCESS_TOKEN manquant</span>"#,
+        ),
+        (_, false, _) => Html(
+            r#"<span class="badge warn" title="INSTAGRAM_BUSINESS_ACCOUNT_ID manquant (identifiant numérique récupéré via /me/accounts → page → instagram_business_account).">INSTAGRAM_BUSINESS_ACCOUNT_ID manquant</span>"#,
+        ),
+        (_, _, false) => Html(
+            r#"<span class="badge warn" title="PUBLIC_BASE_URL manquant. L'URL doit pointer vers ce service de façon publiquement joignable par Meta (ex. https://dti.example.com).">PUBLIC_BASE_URL manquant</span>"#,
+        ),
+        _ => Html(
+            r#"<span class="badge warn" title="Toutes les variables sont présentes mais Config::instagram_enabled() renvoie false — bug interne.">état incohérent</span>"#,
+        ),
     }
 }
 
@@ -1026,12 +1098,11 @@ async fn run_approval(
     };
 
     let slot_key = format!("{}:{discord_msg_id}", mode.as_str());
-    let (intro, button_yes, button_no, approved_text, rejected_text, timeout_text, log_tag) = match mode {
+    let (intro, button_yes, button_no, rejected_text, timeout_text, log_tag) = match mode {
         ApprovalMode::Publish => (
             "📬 Aperçu à valider avant publication Instagram :",
             "✅ Publier sur Instagram",
             "❌ Annuler",
-            "publication Instagram à venir",
             "rien ne sera publié",
             "aucune publication n'aura lieu",
             "publication",
@@ -1040,7 +1111,6 @@ async fn run_approval(
             "✏️ L'annonce Discord a été modifiée.\nMettre à jour la description Instagram (sans supprimer le post) ?",
             "✅ Mettre à jour",
             "❌ Ignorer",
-            "mise à jour Instagram à venir",
             "la description Instagram restera inchangée",
             "la description ne sera pas mise à jour",
             "édition",
@@ -1082,16 +1152,27 @@ async fn run_approval(
 
     match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
         Ok(Ok(ApprovalOutcome::Approved { by })) => {
+            // Run the actual Instagram action (publish or caption edit). If
+            // Instagram isn't configured, returns an "unconfigured" Ok so
+            // operators can still exercise the approval UX.
+            let action =
+                perform_publish_action(&ctx, mode, &discord_msg_id, &filename, &caption).await;
+            let (summary, prefix) = match &action {
+                Ok(line) => (line.clone(), "✅ Approuvé"),
+                Err(err) => (format!("échec: {err}"), "⚠️ Approuvé mais"),
+            };
             push_log(
                 &ctx.poller_log,
-                &format!("approval {log_tag} ✅ {discord_msg_id} par @{by} — ({approved_text})"),
+                &format!(
+                    "approval {log_tag} ✅ {discord_msg_id} par @{by} — {summary}"
+                ),
             )
             .await;
             let _ = tg
                 .edit_message(
                     chat_id,
                     message_id,
-                    &format!("✅ Approuvé par @{by} — {approved_text}."),
+                    &format!("{prefix} par @{by} — {summary}"),
                 )
                 .await;
         }
@@ -1127,12 +1208,77 @@ async fn run_approval(
     }
 }
 
+/// Runs the actual Instagram action for an approved outcome. Returns a
+/// human-readable one-liner describing what happened (goes into both the
+/// Télex log and the Telegram message-edit), or an error string.
+async fn perform_publish_action(
+    ctx: &AppCtx,
+    mode: ApprovalMode,
+    discord_msg_id: &str,
+    filename: &str,
+    caption: &str,
+) -> Result<String, String> {
+    let Some(ig) = ctx.instagram.clone() else {
+        return Ok("Instagram non-configuré — aucune action réelle".into());
+    };
+    match mode {
+        ApprovalMode::Publish => {
+            let image_url =
+                format!("{}/images/{}", ctx.config.public_base_url, filename);
+            let media_id = ig
+                .publish_photo(&image_url, caption)
+                .await
+                .map_err(|e| e.to_string())?;
+            // Persist the ig-media-id under the state lock so a concurrent
+            // poller save can't clobber it.
+            let _guard = ctx.state_write_lock.lock().await;
+            let mut state = AppState::load(&ctx.config.state_path);
+            state
+                .published_to_instagram
+                .insert(discord_msg_id.to_string(), media_id.clone());
+            if let Err(e) = state.save(&ctx.config.state_path) {
+                return Err(format!(
+                    "publié sur Instagram (ig-media-id: {media_id}) mais échec d'écriture state.json: {e}"
+                ));
+            }
+            Ok(format!("publié (ig-media-id: {media_id})"))
+        }
+        ApprovalMode::EditCaption => {
+            let state = AppState::load(&ctx.config.state_path);
+            let Some(media_id) = state.published_to_instagram.get(discord_msg_id).cloned()
+            else {
+                return Err(format!(
+                    "aucune publication Instagram connue pour {discord_msg_id}"
+                ));
+            };
+            ig.update_caption(&media_id, caption)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(format!("description mise à jour (ig-media-id: {media_id})"))
+        }
+    }
+}
+
 /// Consumes edit IDs pushed by the gateway / manual endpoint, fetches the
 /// updated message via REST, and runs an edit-mode approval.
 async fn run_edit_watcher(ctx: AppCtx, mut rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
     while let Some(msg_id) = rx.recv().await {
         let Some(tg) = ctx.telegram.clone() else { continue };
         let Some(chat_id) = ctx.config.telegram_chat_id else { continue };
+
+        // Only bug the operator about an edit if the post was actually
+        // pushed to Instagram. Unpublished messages have nothing to update.
+        let published = AppState::load(&ctx.config.state_path)
+            .published_to_instagram
+            .contains_key(&msg_id);
+        if !published {
+            push_log(
+                &ctx.poller_log,
+                &format!("edit: {msg_id} jamais publié sur Instagram — validation sautée"),
+            )
+            .await;
+            continue;
+        }
 
         // Fetch the updated message body. The MESSAGE_UPDATE gateway event
         // doesn't carry content without the privileged MESSAGE_CONTENT

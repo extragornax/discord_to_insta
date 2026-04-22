@@ -14,6 +14,7 @@ Built for the Mayo Jaune cycling group's weekly ride posts, but the transformati
 - **No JS build step.** Frontend is one static HTML file + htmx from CDN.
 - **Bot shows online.** A minimal Gateway WebSocket runs alongside the REST client so the bot has the green-dot presence Discord users expect.
 - **Human-in-the-loop via Telegram.** Optional approval gate: every new announcement posts a preview (image + caption + ✅/❌ buttons) to a Telegram group. Nothing publishes to Instagram unless someone in the group approves. Runs via long-polling — no public webhook URL required.
+- **Full Discord → Instagram pipeline.** On approval, publishes via Instagram Graph API (two-step `/media` + `/media_publish`). Handles Discord message edits too — asks Telegram "update the Instagram caption?" and, on approval, updates in place (no delete/repost).
 
 ## Stack
 
@@ -64,6 +65,11 @@ All runtime config comes from env. A template lives in [`.env.example`](.env.exa
 | `DISCORD_TO_INSTA_IMAGES_DIR` | no (default: `images`) | Where the `*_{km}.png` post templates live. |
 | `DISCORD_TO_INSTA_STATE_PATH` | no (default: `$XDG_CONFIG_HOME/discord_to_insta/state.json`) | Auto-react state file. |
 | `PORT` | no (default: 8080) | HTTP listen port. |
+| `TELEGRAM_BOT_TOKEN` | approval gate | Bot token from @BotFather. |
+| `TELEGRAM_APPROVAL_CHAT_ID` | approval gate | Chat/group ID (negative for groups, plain i64). |
+| `INSTAGRAM_ACCESS_TOKEN` | publishing | Long-lived Graph API token with `instagram_business_content_publish`. |
+| `INSTAGRAM_BUSINESS_ACCOUNT_ID` | publishing | IG Business Account numeric ID. |
+| `PUBLIC_BASE_URL` | publishing | Base URL reachable from Meta's servers where `/images/*` is served. |
 
 ## Post-image convention
 

@@ -44,6 +44,18 @@ All notable changes to this project are recorded here. Format loosely follows [K
 - `README.md`: project overview, quick-start (docker and cargo), full env-var table, post-image naming convention, auto-react semantics, security note on the unauth'd web UI, known caption-transform limits, and a file-tree cheat sheet. — 2026-04-22
 - `.github/workflows/deploy.yml`: CI deploy. Triggers on push to `master`/`main` (plus `workflow_dispatch`), SSHes into the target via `appleboy/ssh-action@v1.2.0`, runs `git pull --ff-only` and `docker compose up -d --build`, then `docker image prune -f` to avoid layer bloat. `concurrency: deploy` serializes deploys. Requires secrets `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`, `DEPLOY_PATH` (+ optional `SSH_PORT`). README gained a matching "Deployment" section documenting one-time server setup. — 2026-04-22
 
+### Added (Instagram publishing + caption editing via Graph API)
+- `src/instagram.rs` (new): transport-only Graph API v21.0 client. `publish_photo(image_url, caption)` does the two-step container-then-publish flow: `POST /{ig-user-id}/media` → poll `status_code` (up to ~60 s, bails on `ERROR`/`EXPIRED`) → `POST /{ig-user-id}/media_publish` → returns the live `ig-media-id`. `update_caption(media_id, caption)` updates the caption in place (no image change, no delete/repost). Typed Error covers transport, http, api, container-stuck, parse. 3 unit tests on the response envelopes. — 2026-04-22
+- `src/main.rs`:
+  - `Config.{instagram_token, instagram_user_id, public_base_url}` with a combined `instagram_enabled()` gate. Partial config is loud, complete absence is quiet.
+  - `AppCtx.instagram: Option<Arc<instagram::Client>>`, constructed at startup.
+  - New `perform_publish_action(ctx, mode, discord_msg_id, filename, caption)` helper: on `Publish`, calls `publish_photo` with `{PUBLIC_BASE_URL}/images/{filename}` and persists `state.published_to_instagram[discord_msg_id] = ig_media_id` under the existing write-lock. On `EditCaption`, looks up the media id and calls `update_caption`. When Instagram isn't configured, returns an "unconfigured" Ok so the approval UX still exercises end-to-end for testing.
+  - `run_approval`'s Approved branch now routes through `perform_publish_action`; success edits the Telegram message as `✅ Approuvé par @… — publié (ig-media-id: …)`, failure edits it as `⚠️ Approuvé mais échec: …` so the operator sees the exact Graph error without digging through logs.
+  - `run_edit_watcher` now skips messages that aren't in `published_to_instagram` — no point asking "update?" for a post that never happened. — 2026-04-22
+- `src/index.html`: new `Instagram` status chip in the topbar (polls `/api/instagram/status` every 30 s); tooltips name the specific missing var. — 2026-04-22
+- `.env.example`: documented `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_BUSINESS_ACCOUNT_ID`, `PUBLIC_BASE_URL` with prerequisite checklist (IG Business/Creator, FB Page, App permission, token lifecycle, how to fetch the IG Business Account ID). — 2026-04-22
+- `CLAUDE.md`: new "Instagram" section covering the client shape, env vars, state interaction, and the "no retry, edit-Telegram-message-with-error" error-surfacing policy. — 2026-04-22
+
 ### Added (Discord edits → Telegram edit-approval gate)
 - `src/state.rs`: new `published_to_instagram: HashMap<discord_msg_id, ig_media_id>` field with `#[serde(default)]`. Populated by the forthcoming Instagram publish step; consulted by the edit-approval flow to decide whether a Discord edit has anything to propagate. — 2026-04-22
 - `src/discord.rs`: new `fetch_message(channel_id, msg_id)` — single-message GET used by the edit-watcher because MESSAGE_UPDATE gateway events don't include `content` without the privileged MESSAGE_CONTENT intent. — 2026-04-22
