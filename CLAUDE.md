@@ -78,7 +78,7 @@ The project will need Discord bot credentials and Instagram Graph API credential
 
 ### Discord
 
-- Env var: `DISCORD_BOT_TOKEN` — read at startup by `App::new()`. If unset, the UI exposes a masked password field as a fallback. The token is never persisted to disk.
+- Env var: `DISCORD_BOT_TOKEN` — read at startup by `App::new()`. If unset, the UI exposes a masked password field as a fallback. The token is never persisted to disk. A template sits at `.env.example`; copy to `.env` (gitignored) and `source` it before running — the app itself does not auto-load `.env`.
 - Target channel defaults to `981806074233507880` (Mayo Jaune announcements, guild `981525647891525642`). It's only a UI default — the field is editable. Update `DEFAULT_CHANNEL_ID` in `src/main.rs` if the canonical channel ever changes.
 - Ingestion is REST-only (`GET /channels/{id}/messages`) via `ureq`. No gateway, no tokio runtime — fetches run on a `std::thread` and stream results back through an `mpsc` channel so the egui event loop never blocks.
 - The bot needs `View Channel` + `Read Message History` on the announcement channel. For the auto-react poller, it additionally needs `Add Reactions`. No privileged intents required since we're not using the gateway.
