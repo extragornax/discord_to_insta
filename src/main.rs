@@ -8,15 +8,17 @@ mod transform;
 
 use axum::{
     Json, Router,
-    extract::{Form, State},
-    http::StatusCode,
-    response::{Html, IntoResponse},
+    body::Body,
+    extract::{Form, Request, State},
+    http::{HeaderMap, StatusCode},
+    middleware::Next,
+    response::{Html, IntoResponse, Redirect},
     routing::{get, post},
 };
 use discord::{Client, Message};
 use serde::Serialize;
 use state::AppState;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +38,7 @@ const REACTION_EMOJIS: &[&str] = &["✅", "🚫", "🤔"];
 const LOG_MAX_LINES: usize = 40;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(2 * 3600); // 2 hours
 const INDEX_HTML: &str = include_str!("index.html");
+const LOGIN_HTML_TEMPLATE: &str = include_str!("login.html");
 
 /// Seeded on first launch if `AppState.handles` is empty. The user can edit
 /// / remove any of these from the Répertoire panel; they're not re-added
@@ -59,6 +62,7 @@ struct Config {
     /// Publicly-reachable base URL where this service's `/images/*` path
     /// can be fetched by Meta's servers. Required for publishing.
     public_base_url: String,
+    app_password: String,
 }
 
 impl Config {
@@ -108,6 +112,7 @@ struct AppCtx {
     /// configured — publish/edit becomes a logged no-op, Telegram approval
     /// still runs so operators can test the approval UX.
     instagram: Option<Arc<instagram::Client>>,
+    sessions: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,10 +170,14 @@ async fn main() {
             .unwrap_or_default()
             .trim_end_matches('/')
             .to_string(),
+        app_password: std::env::var("APP_PASSWORD").unwrap_or_default(),
     });
 
     if config.token.is_empty() {
         eprintln!("warning: DISCORD_BOT_TOKEN is empty — fetch and auto-react will fail until set");
+    }
+    if !config.app_password.is_empty() {
+        println!("authentication enabled (APP_PASSWORD set)");
     }
 
     let mut state_data = AppState::load(&config.state_path);
@@ -254,6 +263,7 @@ async fn main() {
         pending_approvals: Arc::new(Mutex::new(HashMap::new())),
         edit_tx: edit_tx.clone(),
         instagram: instagram.clone(),
+        sessions: Arc::new(Mutex::new(HashSet::new())),
     };
 
     // Telegram updates loop: long-polls getUpdates and routes callback_query
@@ -296,6 +306,8 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/login", get(login_page).post(login_submit))
+        .route("/logout", get(logout))
         .route("/api/config", get(api_config))
         .route("/api/fetch", post(api_fetch))
         .route("/api/preview", post(api_preview))
@@ -310,6 +322,7 @@ async fn main() {
         .route("/api/telegram/request_edit", post(api_telegram_request_edit))
         .route("/api/instagram/status", get(api_instagram_status))
         .nest_service("/images", ServeDir::new(config.images_dir.clone()))
+        .layer(axum::middleware::from_fn_with_state(ctx.clone(), auth_middleware))
         .with_state(ctx);
 
     let port: u16 = std::env::var("PORT")
@@ -334,8 +347,66 @@ async fn shutdown_signal() {
 
 // ---------- handlers ----------------------------------------------------------
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index(State(ctx): State<AppCtx>) -> Html<String> {
+    let html = if ctx.config.app_password.is_empty() {
+        INDEX_HTML.replace("<!--LOGOUT-->", "")
+    } else {
+        INDEX_HTML.replace(
+            "<!--LOGOUT-->",
+            r#"<a href="/logout" class="press" style="margin-left:auto;font-size:9.5px;padding:4px 8px 3px;text-decoration:none">Déconnexion</a>"#,
+        )
+    };
+    Html(html)
+}
+
+async fn login_page(State(ctx): State<AppCtx>) -> axum::response::Response {
+    if ctx.config.app_password.is_empty() {
+        return Redirect::to("/").into_response();
+    }
+    Html(render_login_page(None)).into_response()
+}
+
+async fn login_submit(
+    State(ctx): State<AppCtx>,
+    Form(form): Form<HashMap<String, String>>,
+) -> axum::response::Response {
+    if ctx.config.app_password.is_empty() {
+        return Redirect::to("/").into_response();
+    }
+    let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
+    if password != ctx.config.app_password {
+        return Html(render_login_page(Some("Mot de passe incorrect."))).into_response();
+    }
+    let token = generate_session_token();
+    ctx.sessions.lock().await.insert(token.clone());
+    axum::http::Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header("location", "/")
+        .header(
+            "set-cookie",
+            format!("dti_session={token}; Path=/; HttpOnly; SameSite=Strict"),
+        )
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn logout(State(ctx): State<AppCtx>, headers: HeaderMap) -> axum::response::Response {
+    if let Some(token) = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|c| extract_cookie(c, "dti_session"))
+    {
+        ctx.sessions.lock().await.remove(&token);
+    }
+    axum::http::Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header("location", "/login")
+        .header(
+            "set-cookie",
+            "dti_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+        )
+        .body(Body::empty())
+        .unwrap()
 }
 
 #[derive(Serialize)]
@@ -760,6 +831,72 @@ fn html_escape(s: &str) -> String {
 
 fn html_attr_escape(s: &str) -> String {
     html_escape(s)
+}
+
+// ---------- auth ---------------------------------------------------------------
+
+async fn auth_middleware(
+    State(ctx): State<AppCtx>,
+    request: Request,
+    next: Next,
+) -> axum::response::Response {
+    if ctx.config.app_password.is_empty() {
+        return next.run(request).await;
+    }
+    let path = request.uri().path();
+    if path == "/login" || path.starts_with("/images/") {
+        return next.run(request).await;
+    }
+    let token = request
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|c| extract_cookie(c, "dti_session"));
+    if let Some(ref t) = token
+        && ctx.sessions.lock().await.contains(t)
+    {
+        return next.run(request).await;
+    }
+    if request.headers().contains_key("hx-request") {
+        axum::http::Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("HX-Redirect", "/login")
+            .body(Body::empty())
+            .unwrap()
+    } else {
+        Redirect::to("/login").into_response()
+    }
+}
+
+fn extract_cookie(header: &str, name: &str) -> Option<String> {
+    header.split(';').find_map(|pair| {
+        let mut parts = pair.trim().splitn(2, '=');
+        let key = parts.next()?.trim();
+        let val = parts.next()?.trim();
+        if key == name {
+            Some(val.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn generate_session_token() -> String {
+    let mut buf = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| {
+            use std::io::Read;
+            f.read_exact(&mut buf)
+        })
+        .expect("/dev/urandom");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn render_login_page(error: Option<&str>) -> String {
+    let error_html = error
+        .map(|e| format!(r#"<div class="login-error">{}</div>"#, html_escape(e)))
+        .unwrap_or_default();
+    LOGIN_HTML_TEMPLATE.replace("<!--ERROR-->", &error_html)
 }
 
 fn env_or(key: &str, fallback: &str) -> String {

@@ -59,6 +59,7 @@ All runtime config comes from env. A template lives in [`.env.example`](.env.exa
 
 | Variable | Required | Purpose |
 |---|---|---|
+| `APP_PASSWORD` | no | When set, the web UI requires this password to log in. Sessions are in-memory (expire on restart). When empty, no authentication. |
 | `DISCORD_BOT_TOKEN` | yes | Bot auth. Needs `View Channel` + `Read Message History` on the channel; add `Add Reactions` if using auto-react. |
 | `DISCORD_CHANNEL_ID` | no (default: Mayo Jaune) | Which channel to fetch from and react to. |
 | `DISCORD_GUILD_ID` | no (default: Mayo Jaune) | Only used to build the "↗ open in Discord" hyperlink for the selected message. |
@@ -93,7 +94,9 @@ The message list in the UI also auto-refreshes every 30 s, so you don't need to 
 
 ## Security note
 
-**The web UI has no authentication.** Anyone who can reach the port can trigger fetches, start/stop the poller, and view the message list. The bot token is never exposed over the UI (read from env only, never surfaced in `/api/config`), but:
+Set `APP_PASSWORD` in `.env` to require a password before accessing the UI. A login page gates all routes except `/login` and `/images/*` (images must stay public for Meta's servers to fetch them during Instagram publishing). Sessions are stored in-memory — a server restart logs everyone out. The bot token is never exposed over the UI (read from env only, never surfaced in `/api/config`).
+
+If `APP_PASSWORD` is **not set**, the UI is open — anyone who can reach the port can trigger fetches, start/stop the poller, and view the message list. In that case:
 
 - Bind the container to a trusted network. The default compose file publishes `0.0.0.0:9010` — that's any interface. If your host is internet-facing, put it behind a reverse proxy with auth, or change the publish to `127.0.0.1:9010:8080`.
 - The bot token in `.env` is a secret. The repo gitignores `.env`, and the docker image is built with a `.dockerignore` that also excludes it.

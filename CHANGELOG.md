@@ -5,6 +5,7 @@ All notable changes to this project are recorded here. Format loosely follows [K
 ## [Unreleased]
 
 ### Added
+- Optional password-based authentication for the web UI. Set `APP_PASSWORD` in `.env` to enable; when unset the UI remains open (backwards compatible). Login page matches the editorial theme. Session cookies are in-memory (expire on restart). `/images/*` stays public so Meta can fetch templates during publishing. Logout button appears in the masthead when auth is active. htmx requests get `HX-Redirect` so background fetches redirect cleanly. — 2026-04-27
 - `CLAUDE.md` with project purpose, stack, Cargo commands, and the caption transformation rules derived from the first worked example (Mayo Jaune ride announcement). — 2026-04-21
 - `CHANGELOG.md` (this file) and a project convention that every change onward must add an entry here. — 2026-04-21
 - `src/transform.rs`: pure `discord_to_caption(raw, user_map)` function implementing the caption rules (strip `@everyone`/`@here`, resolve `<@id>` via a user-supplied map, rewrite `<#id>` and `<@&id>` to `voir Discord (lien en bio)`, drop trailing relative-time suffix, drop `Réactions :` trailer). Includes a Mayo Jaune golden test plus four targeted unit tests. — 2026-04-21

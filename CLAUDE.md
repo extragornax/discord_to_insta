@@ -52,11 +52,12 @@ The user → handle map is the only piece of durable configuration the compose s
 ## Web UI
 
 - One binary, one process: the axum server and the auto-react poller share the tokio runtime. The poller is a `tokio::spawn`'d task, not a separate binary.
-- **No authentication.** Anyone who can reach the port can trigger fetches and start/stop the poller. Bind to localhost or a trusted docker network; don't expose publicly without a reverse proxy that enforces auth.
+- **Optional authentication.** Set `APP_PASSWORD` to gate the UI behind a login page. Sessions are random tokens stored in-memory (`AppCtx.sessions: HashSet<String>`); restart invalidates all sessions. The middleware (`auth_middleware`) passes through `/login` and `/images/*` (Meta must fetch images for publishing). When `APP_PASSWORD` is empty, all routes are open — bind to localhost or a trusted network in that case.
 - Bot token is **only** read from env — there is no UI field to set or view it. This is deliberate: the web UI never handles the secret.
 - Port: `PORT` env var (default 8080).
 - Endpoints:
-  - `GET /` — the single-page app (htmx-driven).
+  - `GET /` — the single-page app (htmx-driven). Protected by auth when `APP_PASSWORD` is set.
+  - `GET /login` — login page (public). `POST /login` — verifies password, sets `dti_session` cookie. `GET /logout` — clears session.
   - `GET /api/config` — JSON with the configured `channel_id` + `guild_id` (never token).
   - `POST /api/fetch` — HTML fragment: the recent messages list.
   - `POST /api/preview` — HTML fragments (caption textarea + OOB image preview) from a form post containing `raw` + `handle_id_N`/`handle_user_N` pairs.
@@ -111,6 +112,7 @@ The project will need Discord bot credentials and Instagram Graph API credential
   - `DISCORD_TO_INSTA_IMAGES_DIR` (optional) — overrides the default `images/` path. Useful when running in a container with a volume mount.
   - `DISCORD_TO_INSTA_STATE_PATH` (optional) — overrides the default XDG state-file path.
   - `PORT` (optional) — HTTP listen port, default 8080.
+  - `APP_PASSWORD` (optional) — when set, the web UI requires this password to log in. Empty or unset = no auth.
 
 ## Docker
 
