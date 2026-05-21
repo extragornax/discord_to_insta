@@ -1,10 +1,17 @@
-//! Minimal Discord Gateway v10 client. All it does is hold a WebSocket
-//! connection open so the bot appears **online** in Discord's user list —
-//! we don't subscribe to any events (`intents: 0`) because message ingestion
-//! still goes through the REST poller in `main.rs`.
+//! Minimal Discord Gateway v10 client. Holds a WebSocket open so the bot
+//! shows online, fires a Notify on every MESSAGE_CREATE in the target
+//! channel so the poller can react in seconds, and — when a `Db` is
+//! attached — logs every MESSAGE_CREATE / MESSAGE_UPDATE / MESSAGE_DELETE
+//! the bot can see (any channel/guild) to Postgres, mirroring the schema
+//! in `../rust-discord-logger`.
+//!
+//! Intents: GUILD_MESSAGES is always requested. If a `Db` is attached,
+//! MESSAGE_CONTENT (privileged) is added so we can store the actual
+//! message body. Without DB logging, content isn't needed.
 //!
 //! Protocol reference: https://discord.com/developers/docs/topics/gateway
 
+use chrono::{DateTime, Utc};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -17,16 +24,20 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::{Message, protocol::CloseFrame};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use crate::db::Db;
+use crate::discord;
+
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const LOG_MAX_LINES: usize = 40;
 
-/// GUILD_MESSAGES (bit 9). Not privileged. Gives us MESSAGE_CREATE /
-/// MESSAGE_UPDATE / MESSAGE_DELETE dispatches — we only act on CREATE.
-/// We deliberately do NOT request MESSAGE_CONTENT (bit 15, privileged)
-/// since the `content` field isn't needed here: we only use the event
-/// to fire an early REST fetch.
-const IDENTIFY_INTENTS: u64 = 1 << 9;
+/// `GUILD_MESSAGES` (bit 9). Not privileged. Gives us MESSAGE_CREATE /
+/// MESSAGE_UPDATE / MESSAGE_DELETE dispatches.
+const INTENT_GUILD_MESSAGES: u64 = 1 << 9;
+/// `MESSAGE_CONTENT` (bit 15). **Privileged** — must be enabled in the
+/// Discord Developer Portal. Without it, `content` arrives empty for
+/// messages the bot didn't author or wasn't @-mentioned in.
+const INTENT_MESSAGE_CONTENT: u64 = 1 << 15;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
@@ -42,8 +53,17 @@ pub struct GatewayCtx {
     pub poll_trigger: Arc<tokio::sync::Notify>,
     /// Every MESSAGE_UPDATE for `channel_id` pushes the message id here.
     /// The edit-watcher task in `main.rs` consumes these and fetches the
-    /// updated body via REST (we don't have MESSAGE_CONTENT intent).
+    /// updated body via REST.
     pub edit_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Optional database sink. When `Some`, every visible MESSAGE_CREATE /
+    /// MESSAGE_UPDATE / MESSAGE_DELETE is persisted. When `None`, no DB
+    /// writes happen and the MESSAGE_CONTENT intent is not requested.
+    pub db: Option<Db>,
+    /// Used to resolve a `guild_id` to a `guild_name` the first time we
+    /// log a message from a new guild. Optional so the gateway can run
+    /// without DB logging (the discord::Client is created in main.rs
+    /// regardless, so in practice this is always `Some` when token is set).
+    pub discord: Option<Arc<discord::Client>>,
 }
 
 pub async fn run(ctx: GatewayCtx) {
@@ -124,13 +144,17 @@ async fn connect_once(ctx: &GatewayCtx) -> ConnectOutcome {
     };
     let heartbeat_interval = Duration::from_millis(hb_ms);
 
-    // IDENTIFY (op 2) with GUILD_MESSAGES so we get MESSAGE_CREATE events
-    // to drive the fast-path poll trigger.
+    // IDENTIFY (op 2). Add MESSAGE_CONTENT only when DB logging is on so
+    // operators without DB don't need to flip the privileged toggle.
+    let mut intents = INTENT_GUILD_MESSAGES;
+    if ctx.db.is_some() {
+        intents |= INTENT_MESSAGE_CONTENT;
+    }
     let identify = json!({
         "op": 2,
         "d": {
             "token": ctx.token,
-            "intents": IDENTIFY_INTENTS,
+            "intents": intents,
             "properties": {
                 "os": "linux",
                 "browser": "discord_to_insta",
@@ -204,40 +228,13 @@ async fn connect_once(ctx: &GatewayCtx) -> ConnectOutcome {
                                 push(&ctx.log, &format!("gateway: READY as {user}")).await;
                             }
                             Some("MESSAGE_CREATE") => {
-                                // Only care about our target channel. Fire the
-                                // trigger so the poller fetches immediately
-                                // instead of waiting up to 30 s.
-                                let ch = v["d"]["channel_id"].as_str().unwrap_or("");
-                                if ch == ctx.channel_id {
-                                    let id = v["d"]["id"].as_str().unwrap_or("?");
-                                    push(
-                                        &ctx.log,
-                                        &format!("gateway: new message {id} — triggering fetch"),
-                                    )
-                                    .await;
-                                    ctx.poll_trigger.notify_one();
-                                }
+                                handle_message_create(ctx, &v["d"]).await;
                             }
                             Some("MESSAGE_UPDATE") => {
-                                // Discord fires this for content edits, embed
-                                // resolves (e.g. a URL in the message gets a
-                                // preview embed), pin status changes, etc. We
-                                // forward unconditionally and let the edit
-                                // watcher in main.rs fetch + diff.
-                                let ch = v["d"]["channel_id"].as_str().unwrap_or("");
-                                if ch == ctx.channel_id {
-                                    let id = v["d"]["id"].as_str().unwrap_or("").to_string();
-                                    if !id.is_empty() {
-                                        push(
-                                            &ctx.log,
-                                            &format!("gateway: edit detected on {id}"),
-                                        )
-                                        .await;
-                                        if let Some(tx) = &ctx.edit_tx {
-                                            let _ = tx.send(id);
-                                        }
-                                    }
-                                }
+                                handle_message_update(ctx, &v["d"]).await;
+                            }
+                            Some("MESSAGE_DELETE") => {
+                                handle_message_delete(ctx, &v["d"]).await;
                             }
                             _ => {}
                         }
@@ -268,6 +265,117 @@ async fn connect_once(ctx: &GatewayCtx) -> ConnectOutcome {
     // Best-effort graceful close. We don't care about errors here.
     let _ = close(write).await;
     outcome
+}
+
+async fn handle_message_create(ctx: &GatewayCtx, d: &Value) {
+    let channel_id_str = d["channel_id"].as_str().unwrap_or("").to_string();
+    let message_id_str = d["id"].as_str().unwrap_or("").to_string();
+
+    // Log to DB first (any channel/guild), then fire the poll trigger
+    // for the configured channel.
+    if let Some(db) = &ctx.db {
+        log_create_to_db(ctx, db, d).await;
+    }
+
+    if !channel_id_str.is_empty() && channel_id_str == ctx.channel_id && !message_id_str.is_empty()
+    {
+        push(
+            &ctx.log,
+            &format!("gateway: new message {message_id_str} — triggering fetch"),
+        )
+        .await;
+        ctx.poll_trigger.notify_one();
+    }
+}
+
+async fn handle_message_update(ctx: &GatewayCtx, d: &Value) {
+    let channel_id_str = d["channel_id"].as_str().unwrap_or("").to_string();
+    let message_id_str = d["id"].as_str().unwrap_or("").to_string();
+
+    if let Some(db) = &ctx.db
+        && let (Some(mid), Some(cid)) = (parse_id(&message_id_str), parse_id(&channel_id_str))
+        && let Some(content) = d.get("content").and_then(|c| c.as_str())
+    {
+        let guild_id = d["guild_id"].as_str().and_then(parse_id);
+        db.log_edit(mid, cid, guild_id, content).await;
+    }
+
+    if !channel_id_str.is_empty() && channel_id_str == ctx.channel_id && !message_id_str.is_empty()
+    {
+        push(
+            &ctx.log,
+            &format!("gateway: edit detected on {message_id_str}"),
+        )
+        .await;
+        if let Some(tx) = &ctx.edit_tx {
+            let _ = tx.send(message_id_str);
+        }
+    }
+}
+
+async fn handle_message_delete(ctx: &GatewayCtx, d: &Value) {
+    let channel_id_str = d["channel_id"].as_str().unwrap_or("").to_string();
+    let message_id_str = d["id"].as_str().unwrap_or("").to_string();
+
+    if let Some(db) = &ctx.db
+        && let (Some(mid), Some(cid)) = (parse_id(&message_id_str), parse_id(&channel_id_str))
+    {
+        let guild_id = d["guild_id"].as_str().and_then(parse_id);
+        db.log_delete(mid, cid, guild_id).await;
+        push(
+            &ctx.log,
+            &format!("gateway: delete logged {message_id_str}"),
+        )
+        .await;
+    }
+}
+
+async fn log_create_to_db(ctx: &GatewayCtx, db: &Db, d: &Value) {
+    // Bots can fire MESSAGE_CREATE too (incl. webhooks). Skip them so the
+    // logger captures actual user activity and the messages table doesn't
+    // bloat with bot chatter.
+    let is_bot = d["author"]["bot"].as_bool().unwrap_or(false);
+    if is_bot {
+        return;
+    }
+
+    let Some(message_id) = d["id"].as_str().and_then(parse_id) else { return };
+    let Some(channel_id) = d["channel_id"].as_str().and_then(parse_id) else { return };
+    let Some(user_id) = d["author"]["id"].as_str().and_then(parse_id) else { return };
+    let username = d["author"]["username"].as_str().unwrap_or("");
+    let content = d["content"].as_str().unwrap_or("");
+    let guild_id_str = d["guild_id"].as_str();
+    let guild_id = guild_id_str.and_then(parse_id);
+    let nickname = d["member"]["nick"].as_str();
+
+    let created_at = d["timestamp"]
+        .as_str()
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+
+    db.log_user(user_id, username).await;
+
+    if let (Some(gid), Some(gid_str)) = (guild_id, guild_id_str) {
+        // Resolve guild name via REST. On failure, fall back to a placeholder
+        // so we still get a row to join against.
+        let name = match &ctx.discord {
+            Some(c) => match c.fetch_guild_name(gid_str).await {
+                Ok(n) => n,
+                Err(_) => format!("guild:{gid_str}"),
+            },
+            None => format!("guild:{gid_str}"),
+        };
+        db.log_guild(gid, &name).await;
+        db.log_member(user_id, gid, nickname).await;
+    }
+
+    db.log_message(message_id, user_id, channel_id, guild_id, content, created_at)
+        .await;
+}
+
+fn parse_id(s: &str) -> Option<i64> {
+    s.parse::<u64>().ok().map(|n| n as i64)
 }
 
 async fn close(write: Arc<Mutex<WsSink>>) -> tokio_tungstenite::tungstenite::Result<()> {

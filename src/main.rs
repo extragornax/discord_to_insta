@@ -1,3 +1,4 @@
+mod db;
 mod discord;
 mod gateway;
 mod images;
@@ -9,7 +10,7 @@ mod transform;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Form, Request, State},
+    extract::{Form, Path, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{Html, IntoResponse, Redirect},
@@ -113,6 +114,10 @@ struct AppCtx {
     /// still runs so operators can test the approval UX.
     instagram: Option<Arc<instagram::Client>>,
     sessions: Arc<Mutex<HashSet<String>>>,
+    /// Postgres logger (matches `../rust-discord-logger`). `None` means
+    /// `DATABASE_URL` was empty/unset — logging is disabled and no
+    /// connection is attempted.
+    db: Option<db::Db>,
 }
 
 #[derive(Debug, Clone)]
@@ -250,9 +255,29 @@ async fn main() {
         None
     };
 
+    // Optional Postgres logger. Empty/unset DATABASE_URL = skip cleanly.
+    // On connection failure we log and continue with logging disabled, so a
+    // database outage never takes the rest of the app down.
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_default();
+    let db_logger = if database_url.is_empty() {
+        println!("Database logging disabled (DATABASE_URL unset).");
+        None
+    } else {
+        match db::Db::connect(&database_url).await {
+            Ok(d) => {
+                println!("Database logging enabled.");
+                Some(d)
+            }
+            Err(e) => {
+                eprintln!("warning: failed to connect to DATABASE_URL: {e} — logging disabled");
+                None
+            }
+        }
+    };
+
     let ctx = AppCtx {
         config: config.clone(),
-        client,
+        client: client.clone(),
         poller_log: Arc::new(Mutex::new(VecDeque::new())),
         poller: Arc::new(Mutex::new(None)),
         last_seen_id: Arc::new(Mutex::new(last_seen)),
@@ -264,6 +289,7 @@ async fn main() {
         edit_tx: edit_tx.clone(),
         instagram: instagram.clone(),
         sessions: Arc::new(Mutex::new(HashSet::new())),
+        db: db_logger.clone(),
     };
 
     // Telegram updates loop: long-polls getUpdates and routes callback_query
@@ -293,6 +319,8 @@ async fn main() {
             connected: ctx.gateway_connected.clone(),
             poll_trigger: ctx.poll_trigger.clone(),
             edit_tx: ctx.edit_tx.clone(),
+            db: ctx.db.clone(),
+            discord: Some(client.clone()),
         };
         tokio::spawn(gateway::run(gw_ctx));
     }
@@ -321,6 +349,9 @@ async fn main() {
         .route("/api/telegram/request", post(api_telegram_request))
         .route("/api/telegram/request_edit", post(api_telegram_request_edit))
         .route("/api/instagram/status", get(api_instagram_status))
+        .route("/api/db/status", get(api_db_status))
+        .route("/api/stats/overview", get(api_stats_overview))
+        .route("/api/stats/user/:user_id", get(api_stats_user))
         .nest_service("/images", ServeDir::new(config.images_dir.clone()))
         .layer(axum::middleware::from_fn_with_state(ctx.clone(), auth_middleware))
         .with_state(ctx);
@@ -541,6 +572,112 @@ async fn api_instagram_status(State(ctx): State<AppCtx>) -> Html<&'static str> {
             r#"<span class="badge warn" title="Toutes les variables sont présentes mais Config::instagram_enabled() renvoie false — bug interne.">état incohérent</span>"#,
         ),
     }
+}
+
+async fn api_db_status(State(ctx): State<AppCtx>) -> Html<&'static str> {
+    if ctx.db.is_some() {
+        Html(r#"<span class="badge ok">connecté</span>"#)
+    } else {
+        Html(
+            r#"<span class="badge muted" title="Définissez DATABASE_URL dans .env (postgres://user:pass@host:5432/db) puis redémarrez.">non-configuré</span>"#,
+        )
+    }
+}
+
+#[derive(Serialize)]
+struct OverviewDto {
+    messages: i64,
+    edits: i64,
+    deletions: i64,
+    users: i64,
+    guilds: i64,
+    top_authors: Vec<TopAuthorDto>,
+}
+
+#[derive(Serialize)]
+struct TopAuthorDto {
+    user_id: String,
+    username: Option<String>,
+    messages: i64,
+}
+
+async fn api_stats_overview(
+    State(ctx): State<AppCtx>,
+) -> Result<Json<OverviewDto>, (StatusCode, String)> {
+    let Some(db) = ctx.db.as_ref() else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "DB not configured".into()));
+    };
+    let overview = db
+        .overview_stats()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let top = db
+        .top_authors(10)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(OverviewDto {
+        messages: overview.messages,
+        edits: overview.edits,
+        deletions: overview.deletions,
+        users: overview.users,
+        guilds: overview.guilds,
+        top_authors: top
+            .into_iter()
+            .map(|a| TopAuthorDto {
+                user_id: a.user_id.to_string(),
+                username: a.username,
+                messages: a.messages,
+            })
+            .collect(),
+    }))
+}
+
+#[derive(Serialize)]
+struct UserStatsDto {
+    user_id: String,
+    messages: i64,
+    edits: i64,
+    deletions: i64,
+    nicknames: Vec<NicknameDto>,
+}
+
+#[derive(Serialize)]
+struct NicknameDto {
+    guild_id: String,
+    guild_name: Option<String>,
+    nickname: String,
+}
+
+async fn api_stats_user(
+    State(ctx): State<AppCtx>,
+    Path(user_id): Path<String>,
+) -> Result<Json<UserStatsDto>, (StatusCode, String)> {
+    let Some(db) = ctx.db.as_ref() else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "DB not configured".into()));
+    };
+    let parsed: i64 = match user_id.parse::<u64>() {
+        Ok(n) => n as i64,
+        Err(_) => return Err((StatusCode::BAD_REQUEST, "user_id must be a u64".into())),
+    };
+    let s = db
+        .user_stats(parsed)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(UserStatsDto {
+        user_id: s.user_id.to_string(),
+        messages: s.messages,
+        edits: s.edits,
+        deletions: s.deletions,
+        nicknames: s
+            .nicknames
+            .into_iter()
+            .map(|(gid, gname, nick)| NicknameDto {
+                guild_id: gid.to_string(),
+                guild_name: gname,
+                nickname: nick,
+            })
+            .collect(),
+    }))
 }
 
 async fn api_telegram_status(State(ctx): State<AppCtx>) -> Html<&'static str> {

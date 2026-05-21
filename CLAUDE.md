@@ -165,6 +165,19 @@ The project will need Discord bot credentials and Instagram Graph API credential
 
 **Edit detection.** `run_edit_watcher` consumes message IDs from an `UnboundedReceiver<String>` fed by (a) the gateway's `MESSAGE_UPDATE` handler and (b) the manual `POST /api/telegram/request_edit` endpoint. For each event it **first checks `state.published_to_instagram`** and skips silently if the message was never published (nothing to update), then fetches the updated message via `discord::Client::fetch_message` (we don't have the privileged MESSAGE_CONTENT intent, so REST is the source of truth), recomputes caption + image, and spawns an edit-mode approval. No filtering on what changed within the content — Discord also fires MESSAGE_UPDATE for embed resolves etc., so the approver may occasionally see spurious "update?" prompts; filter by content hash if this gets noisy.
 
+### Message logging (Postgres)
+
+- `src/db.rs` is a thin sqlx wrapper around the same schema used by `../rust-discord-logger`: `messages`, `message_edits`, `message_deletions`, `users`, `user_names`, `guilds`, `guild_members`, `guild_member_nicknames`. Schema migrations (`CREATE TABLE IF NOT EXISTS …`) run on startup so a fresh Postgres comes up usable. Indexes are created on `messages.user_id` and the edit/deletion `message_id` columns to keep the stats join cheap.
+- Activated by `DATABASE_URL` (e.g. `postgres://postgres:postgres@db:5432/discord_to_insta`). Empty/unset = logging disabled, the gateway falls back to its previous non-content intent set, and no connection is attempted. A connection failure at startup is logged as a warning and the app continues without logging — DB outages never take the rest down.
+- When DB logging is on, the gateway IDENTIFY adds the **privileged `MESSAGE_CONTENT` intent (bit 15)**. You must toggle "Message Content Intent" in the Discord Developer Portal or Discord will close the gateway with code 4014 (Disallowed intents) and the bot will look offline. The privileged toggle is intentionally avoided when logging is off so non-logging operators don't need to flip it.
+- Logging is keyed off everything the bot can see (any channel/guild it has View Channel + Read Message History on), not just the configured announcement channel. Bot-authored MESSAGE_CREATE events (incl. webhooks) are skipped before insert so the table tracks human activity. MESSAGE_DELETE inserts even when the original create wasn't seen (snowflake-keyed), so deletions of pre-existing messages still get a row.
+- Guild names are resolved via REST (`GET /guilds/{id}`) the first time a new guild is seen — adds `discord::Client::fetch_guild_name`. On REST failure the row gets a `guild:{id}` placeholder so the foreign-key shape still works.
+- Endpoints:
+  - `GET /api/db/status` — badge fragment, like the other status badges. Surfaced in the topbar.
+  - `GET /api/stats/overview` — JSON: `{ messages, edits, deletions, users, guilds, top_authors: [{ user_id, username, messages } × 10] }`.
+  - `GET /api/stats/user/:user_id` — JSON: `{ user_id, messages, edits, deletions, nicknames: [{ guild_id, guild_name, nickname }] }`. `user_id` is the Discord snowflake as a decimal string; numeric IDs > i64::MAX would alias but Discord hasn't reached there.
+- All three endpoints sit behind the same auth middleware as everything else — `/api/stats/*` requires login when `APP_PASSWORD` is set.
+
 ### Instagram (publish + caption edit)
 
 - `src/instagram.rs` is a transport-only Graph API client on `v21.0`. Three operations: `create_container(image_url, caption)`, `wait_for_container(creation_id)` (polls `status_code` up to ~60 s waiting for `FINISHED`, bailing on `ERROR`/`EXPIRED`), `publish_container(creation_id)` (returns the ig-media-id), plus a one-shot `update_caption(media_id, caption)`.

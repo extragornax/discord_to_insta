@@ -206,6 +206,35 @@ impl Client {
             .map_err(|e| Error::Parse(format!("{e} — body was: {body}")))
     }
 
+    /// Fetch a guild's name. Used by the gateway logger when it sees a
+    /// MESSAGE_CREATE in a guild it hasn't recorded yet — the gateway
+    /// event itself carries `guild_id` but not the human-readable name.
+    pub async fn fetch_guild_name(&self, guild_id: &str) -> Result<String, Error> {
+        let url = format!("{API_BASE}/guilds/{guild_id}");
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .send()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        if !(200..300).contains(&status) {
+            return Err(map_status(status, body));
+        }
+        let v: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| Error::Parse(format!("{e} — body was: {body}")))?;
+        v.get("name")
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| Error::Parse(format!("missing `name` in guild response: {body}")))
+    }
+
     /// React to a message as the bot. `emoji` must be a Unicode emoji string
     /// (e.g. "✅"). Custom emojis would need `name:id` form, not supported here.
     pub async fn add_reaction(

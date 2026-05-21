@@ -12,6 +12,23 @@ services:
     volumes:
       - ./images:/app/images:ro
       - state:/app/state
+    depends_on:
+      - db
+
+  # Postgres for the message logger (src/db.rs). Skip-able: if you don't
+  # set DATABASE_URL the app simply won't connect, and this container can
+  # be left running unused (or commented out).
+  db:
+    image: postgres:15-alpine
+    container_name: discord_to_insta_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-discord_to_insta}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
 volumes:
   state:
+  postgres_data:
