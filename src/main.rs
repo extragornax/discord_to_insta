@@ -3,6 +3,7 @@ mod discord;
 mod gateway;
 mod images;
 mod instagram;
+mod moderation;
 mod state;
 mod telegram;
 mod transform;
@@ -321,6 +322,10 @@ async fn main() {
             edit_tx: ctx.edit_tx.clone(),
             db: ctx.db.clone(),
             discord: Some(client.clone()),
+            moderation: Some(Arc::new(moderation::Moderator::new(
+                client.clone(),
+                ctx.poller_log.clone(),
+            ))),
         };
         tokio::spawn(gateway::run(gw_ctx));
     }

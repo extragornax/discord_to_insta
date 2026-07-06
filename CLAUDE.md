@@ -138,6 +138,15 @@ The project will need Discord bot credentials and Instagram Graph API credential
 - Status surfaces via `GET /api/gateway/status` (HTML badge, polled every 5 s by the topbar chip).
 - Skipped silently when `DISCORD_BOT_TOKEN` is empty, same principle as the poller.
 
+### Invite-link moderation
+
+- `src/moderation.rs` hooks the gateway's MESSAGE_CREATE handler (any channel the bot can see, not just the announcement channel). Detection regex covers `discord.gg/CODE`, `discord.com/invite/CODE`, `discordapp.com/invite/CODE` (case-insensitive hosts, case-sensitive codes).
+- Policy per (user, invite code): first channel → in-channel warning reply on every offending message; second **distinct** channel → DM the operator (hardcoded `ALERT_USER_ID = 222353499638202369`) once and delete all recorded offending messages, plus every later repeat for that pair. Failed deletes trigger an in-channel notice at most **once per user** across all channels.
+- Tracking is in-memory only (`Moderator.tracker`); restarts forget prior offenses. Enforcement runs in a spawned task so the gateway receive loop never blocks on REST.
+- When the gateway lacks the MESSAGE_CONTENT intent (no `DATABASE_URL`), event `content` is empty, so the body is re-fetched via REST per message before checking. With the intent, clean messages are filtered on the event payload without any REST call.
+- Extra bot permissions: **Send Messages** (warnings/notices) and **Manage Messages** (deletes) on moderated channels. Without Manage Messages the delete fails and the once-per-user notice fires instead.
+- Messages authored by bots (including webhooks) are ignored, which also keeps the moderator from reacting to its own warnings.
+
 ### Auto-react poller
 
 - Lives in `run_poller` (`src/main.rs`) as a `tokio::spawn`'d task. Polls the channel every `POLL_INTERVAL` (30 s) via the same reqwest client used for web-triggered fetches. Interruptible: the `AtomicBool` stop flag is checked every 200 ms during sleep.

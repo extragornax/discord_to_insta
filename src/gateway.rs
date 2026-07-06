@@ -26,6 +26,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::db::Db;
 use crate::discord;
+use crate::moderation;
 
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -64,6 +65,9 @@ pub struct GatewayCtx {
     /// without DB logging (the discord::Client is created in main.rs
     /// regardless, so in practice this is always `Some` when token is set).
     pub discord: Option<Arc<discord::Client>>,
+    /// Invite-link moderation. When `Some`, every MESSAGE_CREATE is checked
+    /// for Discord invite links (warn / escalate / delete).
+    pub moderation: Option<Arc<moderation::Moderator>>,
 }
 
 pub async fn run(ctx: GatewayCtx) {
@@ -275,6 +279,12 @@ async fn handle_message_create(ctx: &GatewayCtx, d: &Value) {
     // for the configured channel.
     if let Some(db) = &ctx.db {
         log_create_to_db(ctx, db, d).await;
+    }
+
+    // Invite-link moderation (any channel). Spawns its own task; never
+    // blocks the receive loop.
+    if let Some(moderator) = &ctx.moderation {
+        moderation::inspect_create(moderator, d);
     }
 
     if !channel_id_str.is_empty() && channel_id_str == ctx.channel_id && !message_id_str.is_empty()

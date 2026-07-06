@@ -264,6 +264,75 @@ impl Client {
         let body = resp.text().await.unwrap_or_default();
         Err(map_status(status, body))
     }
+
+    /// Post a plain text message to a channel. Needs Send Messages.
+    pub async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), Error> {
+        let url = format!("{API_BASE}/channels/{channel_id}/messages");
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .json(&serde_json::json!({ "content": content }))
+            .send()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(map_status(status, body))
+    }
+
+    /// Delete someone else's message. Needs Manage Messages on the channel.
+    pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> Result<(), Error> {
+        let url = format!("{API_BASE}/channels/{channel_id}/messages/{message_id}");
+        let resp = self
+            .http
+            .delete(&url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .send()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(map_status(status, body))
+    }
+
+    /// Open (or reuse) the DM channel with a user and return its channel id.
+    /// Discord returns the existing DM channel when one already exists, so
+    /// calling this repeatedly is cheap and idempotent.
+    pub async fn create_dm(&self, user_id: &str) -> Result<String, Error> {
+        let url = format!("{API_BASE}/users/@me/channels");
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .json(&serde_json::json!({ "recipient_id": user_id }))
+            .send()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        if !(200..300).contains(&status) {
+            return Err(map_status(status, body));
+        }
+        let v: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| Error::Parse(format!("{e} — body was: {body}")))?;
+        v.get("id")
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| Error::Parse(format!("missing `id` in DM channel response: {body}")))
+    }
 }
 
 fn map_status(status: u16, body: String) -> Error {
