@@ -1,12 +1,14 @@
 //! Invite-link moderation. Watches every MESSAGE_CREATE the gateway can
 //! see (any channel), warns users who post Discord invite links, and
 //! escalates when the same user posts the same invite in more than one
-//! channel: the operator gets a DM and the offending messages are deleted.
+//! channel: an alert is posted to the moderation channel and the offending
+//! messages are deleted.
 //!
 //! Escalation policy, per (user, invite code):
 //! - first channel: reply in-channel with a warning (every offending message);
-//! - second distinct channel: DM the operator once, delete every recorded
-//!   offending message (and every later one for that pair);
+//! - second distinct channel: post one alert to the moderation channel,
+//!   delete every recorded offending message (and every later one for that
+//!   pair);
 //! - deletion failure: post a notice in the channel where it failed —
 //!   at most once per user, across all channels.
 //!
@@ -14,8 +16,8 @@
 //! for a small community server — a spammer restarting the clock still gets
 //! warned again on the next link.
 //!
-//! Needs Send Messages (warnings/notices) and Manage Messages (deletes) on
-//! the channels it moderates.
+//! Needs Send Messages (warnings/notices, and the alert channel) and
+//! Manage Messages (deletes) on the channels it moderates.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -26,8 +28,9 @@ use tokio::sync::Mutex;
 
 use crate::discord;
 
-/// Operator DM'd when a cross-channel invite spammer is detected.
-const ALERT_USER_ID: &str = "222353499638202369";
+/// Channel where cross-channel invite-spam alerts are posted
+/// (https://discord.com/channels/981525647891525642/996386287059742851).
+const ALERT_CHANNEL_ID: &str = "996386287059742851";
 
 /// Matches discord.gg/CODE, discord.com/invite/CODE and
 /// discordapp.com/invite/CODE (any casing, any subdomain). The `\b` keeps
@@ -55,7 +58,7 @@ struct Offense {
     /// delete attempt. Drained when escalation fires; failed deletes are
     /// not retried.
     messages: Vec<(String, String)>,
-    /// The operator DM has been sent for this pair.
+    /// The moderation-channel alert has been posted for this pair.
     escalated: bool,
 }
 
@@ -63,11 +66,11 @@ struct Offense {
 enum Action {
     /// Single-channel offense so far: warn in the channel.
     Warn,
-    /// Cross-channel offense: delete these messages; DM the operator when
-    /// `dm` is true (first escalation for the pair only).
+    /// Cross-channel offense: delete these messages; post the moderation
+    /// alert when `alert` is true (first escalation for the pair only).
     Delete {
         messages: Vec<(String, String)>,
-        dm: bool,
+        alert: bool,
     },
 }
 
@@ -90,11 +93,11 @@ impl Tracker {
             .push((channel_id.to_string(), message_id.to_string()));
 
         if offense.channels.len() >= 2 {
-            let dm = !offense.escalated;
+            let alert = !offense.escalated;
             offense.escalated = true;
             Action::Delete {
                 messages: std::mem::take(&mut offense.messages),
-                dm,
+                alert,
             }
         } else {
             Action::Warn
@@ -182,11 +185,11 @@ impl Moderator {
         };
 
         let mut deletes: Vec<(String, String)> = Vec::new();
-        let mut dm_codes: Vec<String> = Vec::new();
+        let mut alert_codes: Vec<String> = Vec::new();
         for (code, action) in actions {
-            if let Action::Delete { messages, dm } = action {
-                if dm {
-                    dm_codes.push(code);
+            if let Action::Delete { messages, alert } = action {
+                if alert {
+                    alert_codes.push(code);
                 }
                 deletes.extend(messages);
             }
@@ -213,26 +216,22 @@ impl Moderator {
             return;
         }
 
-        // DM the operator before deleting, so the alert lands even when the
-        // deletes are about to fail on permissions.
-        for code in dm_codes {
+        // Post the alert before deleting, so it lands even when the deletes
+        // are about to fail on permissions.
+        for code in alert_codes {
             let alert = format!(
                 "🚨 <@{user_id}> (id {user_id}) a posté le lien d'invitation \
                  discord.gg/{code} dans plusieurs salons. Suppression des messages tentée."
             );
-            let sent = match self.client.create_dm(ALERT_USER_ID).await {
-                Ok(dm_channel) => self.client.send_message(&dm_channel, &alert).await,
-                Err(e) => Err(e),
-            };
-            match sent {
+            match self.client.send_message(ALERT_CHANNEL_ID, &alert).await {
                 Ok(()) => {
                     self.push(&format!(
-                        "moderation: alerted operator — {user_id} spammed {code} cross-channel"
+                        "moderation: alert posted — {user_id} spammed {code} cross-channel"
                     ))
                     .await
                 }
                 Err(e) => {
-                    self.push(&format!("moderation: operator DM failed: {e}"))
+                    self.push(&format!("moderation: alert post failed: {e}"))
                         .await
                 }
             }
@@ -337,22 +336,23 @@ mod tests {
     }
 
     #[test]
-    fn second_channel_escalates_with_all_messages_and_one_dm() {
+    fn second_channel_escalates_with_all_messages_and_one_alert() {
         let mut t = Tracker::default();
         assert_eq!(t.record("u1", "code", "chan1", "m1"), Action::Warn);
         assert_eq!(
             t.record("u1", "code", "chan2", "m2"),
             Action::Delete {
                 messages: vec![("chan1".into(), "m1".into()), ("chan2".into(), "m2".into())],
-                dm: true,
+                alert: true,
             }
         );
-        // Later messages for the same pair: delete only the new one, no DM.
+        // Later messages for the same pair: delete only the new one, no
+        // second alert.
         assert_eq!(
             t.record("u1", "code", "chan1", "m3"),
             Action::Delete {
                 messages: vec![("chan1".into(), "m3".into())],
-                dm: false,
+                alert: false,
             }
         );
     }
