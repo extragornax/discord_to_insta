@@ -14,6 +14,13 @@
 //! Send failures are logged, not retried; the date is marked handled
 //! either way so a partial failure can't spam the channel every minute.
 //!
+//! **Manual trigger**: the `/poll` slash command (registered per-guild on
+//! gateway READY, so it shows up in Discord's command picker with
+//! autocompletion) posts both polls immediately, dated the coming Monday.
+//! Only accepted from the poll channel — elsewhere it gets an ephemeral
+//! "wrong channel" reply. It does NOT touch `state.last_weekly_poll`, so
+//! the Sunday auto-post still fires on schedule.
+//!
 //! Times use the process-local timezone — set `TZ` (e.g. `Europe/Paris`)
 //! in the container or the slot means 18:00 UTC.
 
@@ -57,6 +64,105 @@ pub struct WeeklyPollCtx {
     pub state_path: PathBuf,
     /// Same lock as every other state.json writer — see `AppCtx`.
     pub state_write_lock: Arc<Mutex<()>>,
+    /// Poked by the gateway when someone uses `/poll` in the channel.
+    pub trigger: Arc<tokio::sync::Notify>,
+}
+
+/// Handed to the gateway so it can register the slash command on READY and
+/// fire the manual trigger on INTERACTION_CREATE, without depending on the
+/// whole `WeeklyPollCtx`.
+pub struct ManualTrigger {
+    pub channel_id: String,
+    /// Guild the `/poll` command is registered in. Guild commands are
+    /// instant; global ones take up to an hour to propagate.
+    pub guild_id: String,
+    pub notify: Arc<tokio::sync::Notify>,
+}
+
+const COMMAND_NAME: &str = "poll";
+const COMMAND_DESCRIPTION: &str = "Poste les sondages de présence de la semaine";
+
+/// Gateway hook, called on READY. Registers the `/poll` guild command so it
+/// autocompletes in Discord's command picker. Registration is idempotent
+/// (same name → update), so re-running on every reconnect is fine.
+pub fn register_command(
+    trigger: &ManualTrigger,
+    client: &Arc<discord::Client>,
+    application_id: &str,
+    log: &Arc<Mutex<VecDeque<String>>>,
+) {
+    if trigger.guild_id.is_empty() || application_id.is_empty() {
+        return;
+    }
+    let client = client.clone();
+    let application_id = application_id.to_string();
+    let guild_id = trigger.guild_id.clone();
+    let log = log.clone();
+    tokio::spawn(async move {
+        match client
+            .register_guild_command(
+                &application_id,
+                &guild_id,
+                COMMAND_NAME,
+                COMMAND_DESCRIPTION,
+            )
+            .await
+        {
+            Ok(()) => push(&log, "weekly-poll: /poll command registered").await,
+            Err(e) => {
+                push(
+                    &log,
+                    &format!("weekly-poll: /poll registration failed: {e}"),
+                )
+                .await
+            }
+        }
+    });
+}
+
+/// Gateway hook, called on INTERACTION_CREATE. Acknowledges the `/poll`
+/// command (ephemeral) and fires the trigger when it comes from the poll
+/// channel; elsewhere it answers with a redirect. Interactions must be
+/// acked within 3 s, hence the immediate spawn.
+pub fn handle_interaction(
+    trigger: &ManualTrigger,
+    d: &serde_json::Value,
+    client: Option<&Arc<discord::Client>>,
+    log: &Arc<Mutex<VecDeque<String>>>,
+) {
+    // Type 2 = APPLICATION_COMMAND.
+    if d["type"].as_u64() != Some(2) || d["data"]["name"].as_str() != Some(COMMAND_NAME) {
+        return;
+    }
+    let (Some(interaction_id), Some(token), Some(client)) =
+        (d["id"].as_str(), d["token"].as_str(), client)
+    else {
+        return;
+    };
+    let in_poll_channel = d["channel_id"].as_str() == Some(trigger.channel_id.as_str());
+
+    let client = client.clone();
+    let interaction_id = interaction_id.to_string();
+    let token = token.to_string();
+    let notify = trigger.notify.clone();
+    let poll_channel = trigger.channel_id.clone();
+    let log = log.clone();
+    tokio::spawn(async move {
+        let reply = if in_poll_channel {
+            "📊 Sondages en route !".to_string()
+        } else {
+            format!("À utiliser dans <#{poll_channel}>.")
+        };
+        if let Err(e) = client
+            .interaction_reply(&interaction_id, &token, &reply, true)
+            .await
+        {
+            push(&log, &format!("weekly-poll: interaction ack failed: {e}")).await;
+        }
+        if in_poll_channel {
+            notify.notify_one();
+        }
+    });
 }
 
 /// Scheduler loop, spawned once at startup when the feature is configured.
@@ -78,7 +184,7 @@ pub async fn run(ctx: WeeklyPollCtx) {
                     == Some(date_key.as_str())
             };
             if !already {
-                post_polls(&ctx, target.date()).await;
+                post_polls(&ctx, target.date() + ChronoDuration::days(1)).await;
                 let _guard = ctx.state_write_lock.lock().await;
                 let mut st = AppState::load(&ctx.state_path);
                 st.last_weekly_poll = Some(date_key);
@@ -87,12 +193,23 @@ pub async fn run(ctx: WeeklyPollCtx) {
                 }
             }
         }
-        tokio::time::sleep(CHECK_INTERVAL).await;
+        tokio::select! {
+            _ = tokio::time::sleep(CHECK_INTERVAL) => {}
+            _ = ctx.trigger.notified() => {
+                push(&ctx.log, "weekly-poll: manual trigger (/poll)").await;
+                post_polls(&ctx, next_monday(Local::now().date_naive())).await;
+            }
+        }
     }
 }
 
-async fn post_polls(ctx: &WeeklyPollCtx, sunday: NaiveDate) {
-    let monday = sunday + ChronoDuration::days(1);
+/// The coming Monday: `date` itself when it already is one.
+fn next_monday(date: NaiveDate) -> NaiveDate {
+    let days_ahead = (7 - date.weekday().num_days_from_monday() as i64) % 7;
+    date + ChronoDuration::days(days_ahead)
+}
+
+async fn post_polls(ctx: &WeeklyPollCtx, monday: NaiveDate) {
     let polls: [(String, &[(&str, &str)], bool); 2] = [
         (presence_question(monday), PRESENCE_ANSWERS, false),
         (ROLES_QUESTION.to_string(), ROLES_ANSWERS, true),
@@ -232,5 +349,22 @@ mod tests {
         let sunday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
         let monday = sunday + ChronoDuration::days(1);
         assert_eq!(monday, NaiveDate::from_ymd_opt(2026, 7, 20).unwrap());
+    }
+
+    #[test]
+    fn next_monday_from_each_weekday() {
+        let monday = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+        // A Monday maps to itself.
+        assert_eq!(next_monday(monday), monday);
+        // Tuesday → the following Monday.
+        assert_eq!(
+            next_monday(NaiveDate::from_ymd_opt(2026, 7, 21).unwrap()),
+            NaiveDate::from_ymd_opt(2026, 7, 27).unwrap()
+        );
+        // Sunday → the very next day.
+        assert_eq!(
+            next_monday(NaiveDate::from_ymd_opt(2026, 7, 19).unwrap()),
+            monday
+        );
     }
 }

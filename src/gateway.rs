@@ -27,6 +27,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use crate::db::Db;
 use crate::discord;
 use crate::moderation;
+use crate::weekly_poll;
 
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -68,6 +69,9 @@ pub struct GatewayCtx {
     /// Invite-link moderation. When `Some`, every MESSAGE_CREATE is checked
     /// for Discord invite links (warn / escalate / delete).
     pub moderation: Option<Arc<moderation::Moderator>>,
+    /// Weekly-poll manual trigger. When `Some`, the `/poll` guild command
+    /// is registered on READY and INTERACTION_CREATE events fire it.
+    pub weekly_poll_trigger: Option<weekly_poll::ManualTrigger>,
 }
 
 pub async fn run(ctx: GatewayCtx) {
@@ -230,6 +234,15 @@ async fn connect_once(ctx: &GatewayCtx) -> ConnectOutcome {
                                     .as_str()
                                     .unwrap_or("?");
                                 push(&ctx.log, &format!("gateway: READY as {user}")).await;
+                                if let (Some(trigger), Some(client)) =
+                                    (&ctx.weekly_poll_trigger, &ctx.discord)
+                                {
+                                    let app_id =
+                                        v["d"]["application"]["id"].as_str().unwrap_or("");
+                                    weekly_poll::register_command(
+                                        trigger, client, app_id, &ctx.log,
+                                    );
+                                }
                             }
                             Some("MESSAGE_CREATE") => {
                                 handle_message_create(ctx, &v["d"]).await;
@@ -239,6 +252,16 @@ async fn connect_once(ctx: &GatewayCtx) -> ConnectOutcome {
                             }
                             Some("MESSAGE_DELETE") => {
                                 handle_message_delete(ctx, &v["d"]).await;
+                            }
+                            Some("INTERACTION_CREATE") => {
+                                if let Some(trigger) = &ctx.weekly_poll_trigger {
+                                    weekly_poll::handle_interaction(
+                                        trigger,
+                                        &v["d"],
+                                        ctx.discord.as_ref(),
+                                        &ctx.log,
+                                    );
+                                }
                             }
                             _ => {}
                         }

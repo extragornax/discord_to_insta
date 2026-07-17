@@ -68,8 +68,9 @@ struct Config {
     app_password: String,
     /// Channel receiving the weekly attendance polls. Empty = feature off.
     poll_channel_id: String,
-    /// Guild that channel lives in. Informational (logs); the poll POST
-    /// only needs the channel id.
+    /// Guild that channel lives in. Needed to register the `/poll` guild
+    /// slash command (instant, unlike global commands); empty = scheduled
+    /// posts still work but the command isn't registered.
     poll_guild_id: String,
 }
 
@@ -316,6 +317,15 @@ async fn main() {
         tokio::spawn(async move { run_edit_watcher(ctx_for_edits, rx).await });
     }
 
+    // Weekly-poll manual trigger (/poll). Created up front so the gateway
+    // (which fires it on INTERACTION_CREATE) and the poll task (which
+    // awaits it) share the same Notify.
+    let weekly_poll_notify = if !config.token.is_empty() && !config.poll_channel_id.is_empty() {
+        Some(Arc::new(tokio::sync::Notify::new()))
+    } else {
+        None
+    };
+
     // Gateway task: holds a WebSocket to Discord so the bot shows as online,
     // and fires ctx.poll_trigger on every MESSAGE_CREATE in our channel so
     // the poller can react within seconds instead of waiting out its timer.
@@ -334,14 +344,21 @@ async fn main() {
                 client.clone(),
                 ctx.poller_log.clone(),
             ))),
+            weekly_poll_trigger: weekly_poll_notify.as_ref().map(|notify| {
+                weekly_poll::ManualTrigger {
+                    channel_id: config.poll_channel_id.clone(),
+                    guild_id: config.poll_guild_id.clone(),
+                    notify: notify.clone(),
+                }
+            }),
         };
         tokio::spawn(gateway::run(gw_ctx));
     }
 
     // Weekly attendance polls: two native Discord polls every Sunday 18:00
-    // (local time) in WEEKLY_POLL_CHANNEL_ID. Off unless both the token and
-    // the channel are configured.
-    if !config.token.is_empty() && !config.poll_channel_id.is_empty() {
+    // (local time) in WEEKLY_POLL_CHANNEL_ID, plus the /poll manual trigger.
+    // Off unless both the token and the channel are configured.
+    if let Some(notify) = weekly_poll_notify {
         println!(
             "weekly poll armed for channel {} (guild {})",
             config.poll_channel_id, config.poll_guild_id
@@ -352,6 +369,7 @@ async fn main() {
             channel_id: config.poll_channel_id.clone(),
             state_path: config.state_path.clone(),
             state_write_lock: ctx.state_write_lock.clone(),
+            trigger: notify,
         }));
     }
 

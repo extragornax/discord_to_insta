@@ -154,7 +154,8 @@ The project will need Discord bot credentials and Instagram Graph API credential
 - Poll 2 (multi-select, 24 h): « Ceux/Celles présent•e•s, quel(s) rôles(s) êtes-vous prêt•e à remplir ? » — 🚂 Guides / ⚔️ Encadrants/Bloquants / 🔚 Fermants.
 - Scheduling: a 60 s check loop computes the most recent Sunday-18:00 slot; if it's less than 24 h old and `state.last_weekly_poll` (ISO date of that Sunday) doesn't match, both polls are posted and the date is recorded under `state_write_lock`. Restart-safe and catches up a missed slot within 24 h; older than that = skipped until next week. Send failures are logged, not retried (the date is marked anyway to avoid minute-ly spam).
 - **Timezone**: uses `chrono::Local` — set `TZ=Europe/Paris` in the container (docker default is UTC, which would shift the slot to 18:00 UTC).
-- Bot needs **Send Messages** (and the **Send Polls** permission where applicable) on the poll channel.
+- **Manual trigger**: the `/poll` slash command posts both polls immediately, dated the coming Monday (`next_monday`, today included when today is Monday). Registered as a **guild command** on every gateway READY (idempotent upsert; needs `WEEKLY_POLL_GUILD_ID` and the READY payload's `application.id`) so it autocompletes in Discord's picker with no propagation delay. Handled on `INTERACTION_CREATE` (no extra intent needed): ephemeral ack within the 3 s deadline, then the shared `Notify` wakes the poll task. Invocations outside the poll channel get an ephemeral redirect and trigger nothing. Manual posts do **not** write `state.last_weekly_poll`, so the Sunday auto-post still fires.
+- Bot needs **Send Messages** (and the **Send Polls** permission where applicable) on the poll channel, plus the `applications.commands` scope on the bot's guild invite (present by default on the standard bot install link).
 
 ### Auto-react poller
 

@@ -350,6 +350,71 @@ impl Client {
         let body = resp.text().await.unwrap_or_default();
         Err(map_status(status, body))
     }
+
+    /// Register (or update — same name is an upsert) a guild slash command.
+    /// Guild commands appear in the command picker instantly, unlike global
+    /// ones which take up to an hour.
+    pub async fn register_guild_command(
+        &self,
+        application_id: &str,
+        guild_id: &str,
+        name: &str,
+        description: &str,
+    ) -> Result<(), Error> {
+        let url = format!("{API_BASE}/applications/{application_id}/guilds/{guild_id}/commands");
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .json(&serde_json::json!({
+                "name": name,
+                "description": description,
+                "type": 1
+            }))
+            .send()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(map_status(status, body))
+    }
+
+    /// Answer an interaction with a plain message (type 4 callback). Must be
+    /// called within 3 s of receiving the interaction or Discord shows the
+    /// user an error. `ephemeral` makes the reply visible to the invoker
+    /// only. The interaction token authenticates the call — no bot header
+    /// needed, but sending it is harmless.
+    pub async fn interaction_reply(
+        &self,
+        interaction_id: &str,
+        interaction_token: &str,
+        content: &str,
+        ephemeral: bool,
+    ) -> Result<(), Error> {
+        let url = format!("{API_BASE}/interactions/{interaction_id}/{interaction_token}/callback");
+        let mut data = serde_json::json!({ "content": content });
+        if ephemeral {
+            data["flags"] = serde_json::json!(64);
+        }
+        let resp = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({ "type": 4, "data": data }))
+            .send()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(map_status(status, body))
+    }
 }
 
 fn map_status(status: u16, body: String) -> Error {
