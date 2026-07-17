@@ -303,6 +303,53 @@ impl Client {
         let body = resp.text().await.unwrap_or_default();
         Err(map_status(status, body))
     }
+
+    /// Post a native Discord poll (the built-in poll UI). `answers` are
+    /// (unicode emoji, label) pairs — max 10 per Discord's API. `duration`
+    /// is in hours. Needs Send Messages (+ Send Polls) on the channel.
+    pub async fn send_poll(
+        &self,
+        channel_id: &str,
+        question: &str,
+        answers: &[(&str, &str)],
+        duration_hours: u32,
+        allow_multiselect: bool,
+    ) -> Result<(), Error> {
+        let answers_json: Vec<serde_json::Value> = answers
+            .iter()
+            .map(|(emoji, text)| {
+                serde_json::json!({
+                    "poll_media": { "text": text, "emoji": { "name": emoji } }
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "poll": {
+                "question": { "text": question },
+                "answers": answers_json,
+                "duration": duration_hours,
+                "allow_multiselect": allow_multiselect,
+                "layout_type": 1
+            }
+        });
+
+        let url = format!("{API_BASE}/channels/{channel_id}/messages");
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(map_status(status, body))
+    }
 }
 
 fn map_status(status: u16, body: String) -> Error {

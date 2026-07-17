@@ -7,6 +7,7 @@ mod moderation;
 mod state;
 mod telegram;
 mod transform;
+mod weekly_poll;
 
 use axum::{
     Json, Router,
@@ -65,6 +66,11 @@ struct Config {
     /// can be fetched by Meta's servers. Required for publishing.
     public_base_url: String,
     app_password: String,
+    /// Channel receiving the weekly attendance polls. Empty = feature off.
+    poll_channel_id: String,
+    /// Guild that channel lives in. Informational (logs); the poll POST
+    /// only needs the channel id.
+    poll_guild_id: String,
 }
 
 impl Config {
@@ -177,6 +183,8 @@ async fn main() {
             .trim_end_matches('/')
             .to_string(),
         app_password: std::env::var("APP_PASSWORD").unwrap_or_default(),
+        poll_channel_id: std::env::var("WEEKLY_POLL_CHANNEL_ID").unwrap_or_default(),
+        poll_guild_id: std::env::var("WEEKLY_POLL_GUILD_ID").unwrap_or_default(),
     });
 
     if config.token.is_empty() {
@@ -328,6 +336,23 @@ async fn main() {
             ))),
         };
         tokio::spawn(gateway::run(gw_ctx));
+    }
+
+    // Weekly attendance polls: two native Discord polls every Sunday 18:00
+    // (local time) in WEEKLY_POLL_CHANNEL_ID. Off unless both the token and
+    // the channel are configured.
+    if !config.token.is_empty() && !config.poll_channel_id.is_empty() {
+        println!(
+            "weekly poll armed for channel {} (guild {})",
+            config.poll_channel_id, config.poll_guild_id
+        );
+        tokio::spawn(weekly_poll::run(weekly_poll::WeeklyPollCtx {
+            client: client.clone(),
+            log: ctx.poller_log.clone(),
+            channel_id: config.poll_channel_id.clone(),
+            state_path: config.state_path.clone(),
+            state_write_lock: ctx.state_write_lock.clone(),
+        }));
     }
 
     // Auto-start the poller so the bot keeps reacting even when no operator

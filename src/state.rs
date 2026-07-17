@@ -35,6 +35,11 @@ pub struct AppState {
     /// to update.
     #[serde(default)]
     pub published_to_instagram: HashMap<String, String>,
+
+    /// ISO date (`YYYY-MM-DD`) of the Sunday the weekly attendance polls
+    /// were last posted for. Guards against double-posting after a restart.
+    #[serde(default)]
+    pub last_weekly_poll: Option<String>,
 }
 
 impl AppState {

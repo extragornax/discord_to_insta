@@ -147,6 +147,15 @@ The project will need Discord bot credentials and Instagram Graph API credential
 - Extra bot permissions: **Send Messages** (warnings/notices, plus the alert channel) and **Manage Messages** (deletes) on moderated channels. Without Manage Messages the delete fails and the once-per-user notice fires instead.
 - Messages authored by bots (including webhooks) are ignored, which also keeps the moderator from reacting to its own warnings.
 
+### Weekly attendance polls
+
+- `src/weekly_poll.rs` — a process-lifetime task (like the gateway) that posts two **native Discord polls** (`poll` object on `POST /channels/{id}/messages`, not reaction-based) every **Sunday 18:00 server-local time** to `WEEKLY_POLL_CHANNEL_ID`. Feature is off unless both `DISCORD_BOT_TOKEN` and `WEEKLY_POLL_CHANNEL_ID` are set. `WEEKLY_POLL_GUILD_ID` is informational (startup log only).
+- Poll 1 (single choice, 24 h): « Qui sera présent lundi {jour} {mois} {année} ? » — the date is the Monday right after the posting Sunday, French month names hardcoded in `french_month`. Answers: ✅ Présent / 🚫 Absent / 🤔 Ne sais pas encore / 😎 En mode touriste.
+- Poll 2 (multi-select, 24 h): « Ceux/Celles présent•e•s, quel(s) rôles(s) êtes-vous prêt•e à remplir ? » — 🚂 Guides / ⚔️ Encadrants/Bloquants / 🔚 Fermants.
+- Scheduling: a 60 s check loop computes the most recent Sunday-18:00 slot; if it's less than 24 h old and `state.last_weekly_poll` (ISO date of that Sunday) doesn't match, both polls are posted and the date is recorded under `state_write_lock`. Restart-safe and catches up a missed slot within 24 h; older than that = skipped until next week. Send failures are logged, not retried (the date is marked anyway to avoid minute-ly spam).
+- **Timezone**: uses `chrono::Local` — set `TZ=Europe/Paris` in the container (docker default is UTC, which would shift the slot to 18:00 UTC).
+- Bot needs **Send Messages** (and the **Send Polls** permission where applicable) on the poll channel.
+
 ### Auto-react poller
 
 - Lives in `run_poller` (`src/main.rs`) as a `tokio::spawn`'d task. Polls the channel every `POLL_INTERVAL` (30 s) via the same reqwest client used for web-triggered fetches. Interruptible: the `AtomicBool` stop flag is checked every 200 ms during sleep.
